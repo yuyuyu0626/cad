@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from .dataset import BBox8PoseDataset, collate_bbox8, transform_points_from_crop
+from .dataset import BBox8PoseDataset, collate_bbox8
 from .heatmap import decode_heatmaps_argmax
 from .losses import WeightedHeatmapMSELoss
 from .metrics import corner_l2_error
@@ -33,9 +33,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--backbone", choices=["simple", "resnet18", "resnet34"], default="resnet18")
     parser.add_argument("--pretrained_backbone", action="store_true", help="Use torchvision pretrained weights if available.")
     parser.add_argument("--base_channels", type=int, default=32, help="Only used when backbone=simple.")
-    parser.add_argument("--crop_mode", choices=["full", "bbox"], default="bbox", help="Train on full image or GT-bbox crop.")
-    parser.add_argument("--crop_padding", type=float, default=0.25, help="Relative padding around GT bbox when crop_mode=bbox.")
-    parser.add_argument("--crop_square", action=argparse.BooleanOptionalAction, default=True, help="Force square crop around the GT bbox.")
     parser.add_argument("--vis_every", type=int, default=1, help="Export validation visualizations every N epochs.")
     parser.add_argument("--vis_num_samples", type=int, default=4, help="Number of validation samples to visualize.")
     return parser.parse_args()
@@ -52,9 +49,6 @@ def build_dataloaders(args: argparse.Namespace) -> Dict[str, DataLoader]:
         heatmap_size=heatmap_size,
         sigma=args.sigma,
         augment=True,
-        crop_mode=args.crop_mode,
-        crop_padding=args.crop_padding,
-        crop_square=args.crop_square,
     )
     val_set = BBox8PoseDataset(
         labels_root=args.labels_root,
@@ -63,9 +57,6 @@ def build_dataloaders(args: argparse.Namespace) -> Dict[str, DataLoader]:
         heatmap_size=heatmap_size,
         sigma=args.sigma,
         augment=False,
-        crop_mode=args.crop_mode,
-        crop_padding=args.crop_padding,
-        crop_square=args.crop_square,
     )
     return {
         "train": DataLoader(
@@ -97,8 +88,7 @@ def run_epoch(model, loader, criterion, optimizer, device, image_size, train: bo
         images = batch["image"].to(device)
         target_heatmaps = batch["heatmaps"].to(device)
         valid_mask = batch["valid_mask"].to(device)
-        gt_xy = batch["corners_xy_orig"].to(device)
-        crop_box = batch["crop_box"].to(device)
+        gt_xy = batch["corners_xy"].to(device)
 
         with torch.set_grad_enabled(train):
             pred_heatmaps = model(images)
@@ -109,7 +99,6 @@ def run_epoch(model, loader, criterion, optimizer, device, image_size, train: bo
                 optimizer.step()
 
         pred_xy = decode_heatmaps_argmax(pred_heatmaps.detach(), image_size=image_size)
-        pred_xy = transform_points_from_crop(pred_xy, crop_box, image_size=image_size)
         metrics = corner_l2_error(pred_xy.cpu(), gt_xy.cpu(), valid_mask.cpu())
         total_loss += loss.item()
         total_metric += metrics["mean_corner_l2"]
@@ -144,12 +133,10 @@ def export_val_visualizations(model, dataset, device, image_size, output_dir, ep
         if image_bgr is None:
             continue
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        crop_box = sample["crop_box"]
-        pred_xy_orig = transform_points_from_crop(
-            torch.from_numpy(pred_xy).float(),
-            crop_box,
-            image_size=image_size,
-        ).cpu().numpy()
+        orig_h, orig_w = image_rgb.shape[:2]
+        pred_xy_orig = pred_xy.copy()
+        pred_xy_orig[:, 0] *= orig_w / float(image_size[0])
+        pred_xy_orig[:, 1] *= orig_h / float(image_size[1])
         gt_xy_orig = sample["corners_xy_orig"].cpu().numpy()
 
         pred_vis = draw_corners(image_rgb, pred_xy_orig, valid_mask)

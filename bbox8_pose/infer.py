@@ -7,7 +7,6 @@ import cv2
 import numpy as np
 import torch
 
-from .dataset import compute_crop_box, transform_points_from_crop, CropConfig
 from .heatmap import decode_heatmaps_argmax
 from .model import BBox8PoseNet
 from .utils import draw_corners, ensure_dir, save_json, solve_pnp_from_bbox8
@@ -21,10 +20,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image_width", type=int, default=256)
     parser.add_argument("--image_height", type=int, default=256)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--bbox_json", default=None, help="Optional JSON mapping image stems/paths to [x, y, w, h] boxes for crop-based inference.")
-    parser.add_argument("--crop_mode", choices=["full", "bbox"], default="full")
-    parser.add_argument("--crop_padding", type=float, default=0.25)
-    parser.add_argument("--crop_square", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--camera_json", default=None, help="Optional json with key cam_K or a flat 3x3 list")
     parser.add_argument("--bbox3d_json", default=None, help="Optional object_bbox_3d.json for solvePnP")
     return parser.parse_args()
@@ -48,21 +43,6 @@ def load_camera_matrix(path: str) -> np.ndarray:
     return np.asarray(cam_k, dtype=np.float32).reshape(3, 3)
 
 
-def load_bbox_mapping(path: str):
-    if not path:
-        return {}
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def lookup_bbox(bbox_map, image_path: str):
-    if not bbox_map:
-        return None
-    stem = os.path.splitext(os.path.basename(image_path))[0]
-    abs_path = os.path.abspath(image_path)
-    return bbox_map.get(abs_path) or bbox_map.get(image_path) or bbox_map.get(stem)
-
-
 def main() -> None:
     args = parse_args()
     ensure_dir(args.output_dir)
@@ -72,12 +52,6 @@ def main() -> None:
     ckpt_args = ckpt.get("args", {})
     args.image_width = ckpt_args.get("image_width", args.image_width)
     args.image_height = ckpt_args.get("image_height", args.image_height)
-    if args.crop_mode == "full" and ckpt_args.get("crop_mode") == "bbox":
-        args.crop_mode = "bbox"
-    if abs(args.crop_padding - 0.25) < 1e-9:
-        args.crop_padding = ckpt_args.get("crop_padding", args.crop_padding)
-    if args.crop_square is True:
-        args.crop_square = ckpt_args.get("crop_square", args.crop_square)
     model = BBox8PoseNet(
         backbone=ckpt_args.get("backbone", "resnet18"),
         pretrained_backbone=False,
@@ -93,8 +67,6 @@ def main() -> None:
     if args.bbox3d_json:
         with open(args.bbox3d_json, "r", encoding="utf-8") as f:
             corners_3d = np.asarray(json.load(f)["corners_3d_object"], dtype=np.float32)
-    bbox_map = load_bbox_mapping(args.bbox_json)
-    crop_cfg = CropConfig(mode=args.crop_mode, padding=args.crop_padding, square=args.crop_square)
 
     for image_path in image_paths:
         image_bgr = cv2.imread(image_path, cv2.IMREAD_COLOR)
@@ -102,14 +74,7 @@ def main() -> None:
             raise ValueError(f"Failed to read image: {image_path}")
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         orig_h, orig_w = image_rgb.shape[:2]
-        bbox_xywh = lookup_bbox(bbox_map, image_path)
-        crop_box = compute_crop_box((orig_w, orig_h), bbox_xywh, crop_cfg)
-        x1, y1, x2, y2 = crop_box
-        image_crop = image_rgb[y1:y2, x1:x2]
-        if image_crop.size == 0:
-            image_crop = image_rgb
-            crop_box = (0, 0, orig_w, orig_h)
-        resized = cv2.resize(image_crop, (args.image_width, args.image_height), interpolation=cv2.INTER_LINEAR)
+        resized = cv2.resize(image_rgb, (args.image_width, args.image_height), interpolation=cv2.INTER_LINEAR)
         tensor = torch.from_numpy(resized).permute(2, 0, 1).float().unsqueeze(0) / 255.0
         tensor = tensor.to(device)
 
@@ -117,17 +82,16 @@ def main() -> None:
             pred_heatmaps = model(tensor)
             pred_xy = decode_heatmaps_argmax(pred_heatmaps, image_size=(args.image_width, args.image_height))[0].cpu().numpy()
 
-        pred_xy_orig = transform_points_from_crop(
-            torch.from_numpy(pred_xy).float(),
-            torch.tensor(crop_box, dtype=torch.float32),
-            image_size=(args.image_width, args.image_height),
-        ).cpu().numpy()
+        scale_x = orig_w / float(args.image_width)
+        scale_y = orig_h / float(args.image_height)
+        pred_xy_orig = pred_xy.copy()
+        pred_xy_orig[:, 0] *= scale_x
+        pred_xy_orig[:, 1] *= scale_y
         valid_mask = np.ones(8, dtype=np.float32)
 
         result = {
             "image_path": os.path.abspath(image_path),
             "corners_2d": pred_xy_orig.tolist(),
-            "crop_box_xyxy": list(crop_box),
         }
         if camera_K is not None and corners_3d is not None:
             pnp = solve_pnp_from_bbox8(corners_3d, pred_xy_orig, camera_K, valid_mask)

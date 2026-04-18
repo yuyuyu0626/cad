@@ -20,14 +20,6 @@ class AugmentConfig:
     blur_prob: float = 0.1
 
 
-@dataclass
-class CropConfig:
-    mode: str = "full"
-    padding: float = 0.25
-    square: bool = True
-    min_size: int = 32
-
-
 def _load_jsonl(path: str) -> List[Dict]:
     records: List[Dict] = []
     with open(path, "r", encoding="utf-8") as f:
@@ -43,87 +35,6 @@ def _load_split_ids(path: str) -> List[str]:
         return [line.strip() for line in f if line.strip()]
 
 
-def compute_crop_box(
-    orig_size: Tuple[int, int],
-    bbox_xywh: Optional[List[float]],
-    crop_cfg: CropConfig,
-) -> Tuple[int, int, int, int]:
-    orig_w, orig_h = orig_size
-    if crop_cfg.mode == "full" or bbox_xywh is None:
-        return (0, 0, orig_w, orig_h)
-
-    x, y, w, h = [float(v) for v in bbox_xywh]
-    if w <= 1 or h <= 1 or x < 0 or y < 0:
-        return (0, 0, orig_w, orig_h)
-
-    cx = x + 0.5 * w
-    cy = y + 0.5 * h
-    crop_w = w * (1.0 + crop_cfg.padding * 2.0)
-    crop_h = h * (1.0 + crop_cfg.padding * 2.0)
-    if crop_cfg.square:
-        side = max(crop_w, crop_h, float(crop_cfg.min_size))
-        crop_w = side
-        crop_h = side
-    else:
-        crop_w = max(crop_w, float(crop_cfg.min_size))
-        crop_h = max(crop_h, float(crop_cfg.min_size))
-
-    x1 = int(round(cx - 0.5 * crop_w))
-    y1 = int(round(cy - 0.5 * crop_h))
-    x2 = int(round(cx + 0.5 * crop_w))
-    y2 = int(round(cy + 0.5 * crop_h))
-
-    x1 = max(0, x1)
-    y1 = max(0, y1)
-    x2 = min(orig_w, x2)
-    y2 = min(orig_h, y2)
-
-    if x2 <= x1:
-        x2 = min(orig_w, x1 + crop_cfg.min_size)
-        x1 = max(0, x2 - crop_cfg.min_size)
-    if y2 <= y1:
-        y2 = min(orig_h, y1 + crop_cfg.min_size)
-        y1 = max(0, y2 - crop_cfg.min_size)
-    return (x1, y1, x2, y2)
-
-
-def transform_points_to_crop(
-    corners_xy: torch.Tensor,
-    crop_box: Tuple[int, int, int, int],
-    image_size: Tuple[int, int],
-) -> torch.Tensor:
-    x1, y1, x2, y2 = crop_box
-    crop_w = max(1.0, float(x2 - x1))
-    crop_h = max(1.0, float(y2 - y1))
-    corners_crop = corners_xy.clone()
-    corners_crop[:, 0] = (corners_crop[:, 0] - float(x1)) * (image_size[0] / crop_w)
-    corners_crop[:, 1] = (corners_crop[:, 1] - float(y1)) * (image_size[1] / crop_h)
-    return corners_crop
-
-
-def transform_points_from_crop(
-    corners_xy: torch.Tensor,
-    crop_box: torch.Tensor,
-    image_size: Tuple[int, int],
-) -> torch.Tensor:
-    if crop_box.ndim == 1:
-        crop_box = crop_box.unsqueeze(0)
-        corners_xy = corners_xy.unsqueeze(0)
-        squeeze = True
-    else:
-        squeeze = False
-
-    x1 = crop_box[:, 0].unsqueeze(-1)
-    y1 = crop_box[:, 1].unsqueeze(-1)
-    crop_w = (crop_box[:, 2] - crop_box[:, 0]).clamp(min=1.0).unsqueeze(-1)
-    crop_h = (crop_box[:, 3] - crop_box[:, 1]).clamp(min=1.0).unsqueeze(-1)
-
-    coords = corners_xy.clone()
-    coords[..., 0] = coords[..., 0] * (crop_w / float(image_size[0])) + x1
-    coords[..., 1] = coords[..., 1] * (crop_h / float(image_size[1])) + y1
-    return coords[0] if squeeze else coords
-
-
 class BBox8PoseDataset(Dataset):
     def __init__(
         self,
@@ -134,9 +45,6 @@ class BBox8PoseDataset(Dataset):
         sigma: float = 2.5,
         use_soft_mask_filter: bool = True,
         augment: bool = False,
-        crop_mode: str = "full",
-        crop_padding: float = 0.25,
-        crop_square: bool = True,
         seed: int = 42,
     ) -> None:
         self.labels_root = os.path.abspath(labels_root)
@@ -147,7 +55,6 @@ class BBox8PoseDataset(Dataset):
         self.augment = augment
         self.rng = random.Random(seed)
         self.augment_cfg = AugmentConfig()
-        self.crop_cfg = CropConfig(mode=crop_mode, padding=crop_padding, square=crop_square)
 
         ann_path = os.path.join(self.labels_root, "annotations.jsonl")
         split_path = os.path.join(self.labels_root, f"{split}.txt")
@@ -195,20 +102,16 @@ class BBox8PoseDataset(Dataset):
         if self.augment:
             image = self._apply_augmentation(image)
 
-        bbox_xywh = rec.get("bbox_visib") or rec.get("bbox_obj")
-        crop_box = compute_crop_box((orig_w, orig_h), bbox_xywh, self.crop_cfg)
-        x1, y1, x2, y2 = crop_box
-        image_crop = image[y1:y2, x1:x2]
-        if image_crop.size == 0:
-            image_crop = image
-            crop_box = (0, 0, orig_w, orig_h)
-
-        resized = cv2.resize(image_crop, (self.image_size[0], self.image_size[1]), interpolation=cv2.INTER_LINEAR)
+        resized = cv2.resize(image, (self.image_size[0], self.image_size[1]), interpolation=cv2.INTER_LINEAR)
         image_tensor = torch.from_numpy(resized).permute(2, 0, 1).float() / 255.0
 
         corners = torch.tensor(rec["corners_2d"], dtype=torch.float32)
         valid_mask = torch.tensor(rec["corner_valid_mask"], dtype=torch.float32)
-        corners_resized = transform_points_to_crop(corners, crop_box, self.image_size)
+        scale_x = self.image_size[0] / float(orig_w)
+        scale_y = self.image_size[1] / float(orig_h)
+        corners_resized = corners.clone()
+        corners_resized[:, 0] *= scale_x
+        corners_resized[:, 1] *= scale_y
 
         if self.use_soft_mask_filter and rec.get("visib_fract", 1.0) <= 0:
             valid_mask.zero_()
@@ -232,14 +135,13 @@ class BBox8PoseDataset(Dataset):
             "sample_id": rec["sample_id"],
             "rgb_path": rec["rgb_path"],
             "orig_size": torch.tensor([orig_w, orig_h], dtype=torch.float32),
-            "crop_box": torch.tensor(crop_box, dtype=torch.float32),
         }
         return sample
 
 
 def collate_bbox8(batch: List[Dict]) -> Dict[str, torch.Tensor]:
     collated: Dict[str, torch.Tensor] = {}
-    tensor_keys = ["image", "heatmaps", "corners_xy", "corners_xy_orig", "valid_mask", "camera_K", "corners_3d", "orig_size", "crop_box"]
+    tensor_keys = ["image", "heatmaps", "corners_xy", "corners_xy_orig", "valid_mask", "camera_K", "corners_3d", "orig_size"]
     for key in tensor_keys:
         collated[key] = torch.stack([item[key] for item in batch], dim=0)
     collated["sample_id"] = [item["sample_id"] for item in batch]
