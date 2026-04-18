@@ -56,6 +56,10 @@ def main() -> None:
         backbone=ckpt_args.get("backbone", "resnet18"),
         pretrained_backbone=False,
         base_channels=ckpt_args.get("base_channels", 32),
+        decoder=ckpt_args.get("decoder", "boxdreamer_lite"),
+        decoder_dim=ckpt_args.get("decoder_dim", 192),
+        decoder_depth=ckpt_args.get("decoder_depth", 3),
+        decoder_heads=ckpt_args.get("decoder_heads", 8),
     )
     model.load_state_dict(ckpt["model"])
     model.to(device)

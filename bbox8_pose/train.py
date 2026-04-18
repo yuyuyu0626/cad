@@ -33,6 +33,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--backbone", choices=["simple", "resnet18", "resnet34"], default="resnet18")
     parser.add_argument("--pretrained_backbone", action="store_true", help="Use torchvision pretrained weights if available.")
     parser.add_argument("--base_channels", type=int, default=32, help="Only used when backbone=simple.")
+    parser.add_argument("--decoder", choices=["fpn", "boxdreamer_lite"], default="boxdreamer_lite")
+    parser.add_argument("--decoder_dim", type=int, default=192)
+    parser.add_argument("--decoder_depth", type=int, default=3)
+    parser.add_argument("--decoder_heads", type=int, default=8)
     parser.add_argument("--vis_every", type=int, default=1, help="Export validation visualizations every N epochs.")
     parser.add_argument("--vis_num_samples", type=int, default=4, help="Number of validation samples to visualize.")
     return parser.parse_args()
@@ -158,6 +162,10 @@ def main() -> None:
         backbone=args.backbone,
         pretrained_backbone=args.pretrained_backbone,
         base_channels=args.base_channels,
+        decoder=args.decoder,
+        decoder_dim=args.decoder_dim,
+        decoder_depth=args.decoder_depth,
+        decoder_heads=args.decoder_heads,
     ).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
