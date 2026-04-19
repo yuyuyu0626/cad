@@ -94,3 +94,32 @@ ffmpeg -framerate 2997/100 -i /home/zhanght2504/zhanght2504/runspace_yyx5/output
   -vf "pad=ceil(iw/2)*2:ceil(ih/2)*2" \
   -c:v libx264 -pix_fmt yuv420p \
   /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_dji_action4_test/demo_vis.mp4
+
+
+
+# 测试指标
+python /home/zhanght2504/zhanght2504/runspace_yyx5/utils/analyze_bbox8_infer_results.py \
+  --infer_dir /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_dji_action4_test \
+  --camera_json /home/zhanght2504/zhanght2504/runspace_yyx5/HCCEPose/dji_action4/camera.json \
+  --bbox3d_json /home/zhanght2504/zhanght2504/runspace_yyx5/HCCEPose/dji_action4/bbox8_labels_obj_000001/object_bbox_3d.json
+
+生成文件信息：
+每一帧的详细指标
+temporal_metrics.csv
+相邻帧之间的时序变化指标
+summary.json
+汇总统计
+report.txt
+人能直接看的一页结论摘要
+
+关键指标：
+in_frame_ratio 的平均值
+越接近 1.0 越好
+bbox_area_ratio
+不要太小，也不要乱跳太大
+center_disp
+相邻帧不要跳得太夸张
+rot_delta_deg / trans_delta
+如果视频本身运动平滑，这些也应该比较平滑
+frame_metrics.csv
+
