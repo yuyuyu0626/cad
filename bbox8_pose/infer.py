@@ -39,8 +39,35 @@ def collect_images(path: str) -> List[str]:
 def load_camera_matrix(path: str) -> np.ndarray:
     with open(path, "r", encoding="utf-8") as f:
         obj = json.load(f)
-    cam_k = obj.get("cam_K", obj)
-    return np.asarray(cam_k, dtype=np.float32).reshape(3, 3)
+    if isinstance(obj, dict):
+        if "cam_K" in obj:
+            cam_k = obj["cam_K"]
+            return np.asarray(cam_k, dtype=np.float32).reshape(3, 3)
+        if all(k in obj for k in ("fx", "fy", "cx", "cy")):
+            return np.asarray(
+                [
+                    [obj["fx"], 0.0, obj["cx"]],
+                    [0.0, obj["fy"], obj["cy"]],
+                    [0.0, 0.0, 1.0],
+                ],
+                dtype=np.float32,
+            )
+        # Support nested BOP-like single-entry dicts if ever passed in.
+        if len(obj) == 1:
+            only_value = next(iter(obj.values()))
+            if isinstance(only_value, dict):
+                if "cam_K" in only_value:
+                    return np.asarray(only_value["cam_K"], dtype=np.float32).reshape(3, 3)
+                if all(k in only_value for k in ("fx", "fy", "cx", "cy")):
+                    return np.asarray(
+                        [
+                            [only_value["fx"], 0.0, only_value["cx"]],
+                            [0.0, only_value["fy"], only_value["cy"]],
+                            [0.0, 0.0, 1.0],
+                        ],
+                        dtype=np.float32,
+                    )
+    return np.asarray(obj, dtype=np.float32).reshape(3, 3)
 
 
 def main() -> None:

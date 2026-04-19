@@ -31,6 +31,7 @@ def draw_gaussian(
 
 
 def generate_corner_heatmaps(
+    # 根据（缩放后的）2d角点坐标生成热图
     corners_xy: torch.Tensor,
     valid_mask: torch.Tensor,
     image_size: Tuple[int, int],
@@ -54,6 +55,7 @@ def generate_corner_heatmaps(
 
 
 def decode_heatmaps_argmax(heatmaps: torch.Tensor, image_size: Tuple[int, int]) -> torch.Tensor:
+    # 根据热图解码出2d角点坐标
     batch, channels, hm_h, hm_w = heatmaps.shape
     flat_idx = heatmaps.view(batch, channels, -1).argmax(dim=-1)
     ys = (flat_idx // hm_w).float()

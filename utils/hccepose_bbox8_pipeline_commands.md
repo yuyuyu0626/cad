@@ -34,50 +34,63 @@ python /home/zhanght2504/zhanght2504/runspace_yyx5/utils/gen_bbox8_labels_from_b
 
 
 # train
-cd /home/zhanght2504/zhanght2504/runspace_yyx5
+cd /data/zht_data/zhanght2504/runspace_yyx5
 
 python -m bbox8_pose.train \
   --labels_root /home/zhanght2504/zhanght2504/runspace_yyx5/HCCEPose/dji_action4/bbox8_labels_obj_000001 \
-  --output_dir /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_obj_000001_resnet18 \
-  --epochs 100 \
+  --output_dir /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_obj_000001_boxdreamer_lite \
+  --epochs 80 \
   --batch_size 8 \
   --num_workers 4 \
-  --lr 1e-3 \
-  --image_width 512 \
-  --image_height 512 \
-  --heatmap_width 128 \
-  --heatmap_height 128 \
+  --lr 3e-4 \
+  --image_width 384 \
+  --image_height 384 \
+  --heatmap_width 96 \
+  --heatmap_height 96 \
   --sigma 2.5 \
   --device cuda \
   --backbone resnet18 \
+  --decoder boxdreamer_lite \
+  --decoder_dim 192 \
+  --decoder_depth 3 \
+  --decoder_heads 8 \
   --vis_every 1 \
   --vis_num_samples 4
 
 
+
 # 训练后验证
-python -m bbox8_pose.infer \
-  --checkpoint /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_obj_000001_resnet18/best.pt \
+CUDA_VISIBLE_DEVICES=1 python -m bbox8_pose.infer \
+  --checkpoint /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_obj_000001_boxdreamer_lite/best_metric.pt \
   --input /home/zhanght2504/zhanght2504/runspace_yyx5/HCCEPose/dji_action4/train_pbr/000000/rgb \
-  --output_dir /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_val_infer \
+  --output_dir /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_boxdreamer_lite_infer \
   --camera_json /home/zhanght2504/zhanght2504/runspace_yyx5/HCCEPose/dji_action4/camera.json \
   --bbox3d_json /home/zhanght2504/zhanght2504/runspace_yyx5/HCCEPose/dji_action4/bbox8_labels_obj_000001/object_bbox_3d.json \
   --device cuda
+
 
 
 # 真实视频测试
 抽帧
 mkdir -p /home/zhanght2504/zhanght2504/runspace_yyx5/test_video_frames
 
-ffmpeg -i /home/zhanght2504/zhanght2504/runspace_yyx5/head_left_rgb_raw.mp4 \
+ffmpeg -i /home/zhanght2504/zhanght2504/runspace_yyx5/head_left_rgb_raw.mp4/head_left_rgb_raw.mp4 \
   -qscale:v 2 \
   /home/zhanght2504/zhanght2504/runspace_yyx5/test_video_frames/%06d.jpg
 
 
 推理
-python -m bbox8_pose.infer \
-  --checkpoint /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_obj_000001_resnet18/best.pt \
+CUDA_VISIBLE_DEVICES=1 python -m bbox8_pose.infer \
+  --checkpoint /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_obj_000001_boxdreamer_lite/best_metric.pt \
   --input /home/zhanght2504/zhanght2504/runspace_yyx5/test_video_frames \
-  --output_dir /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_video_test \
+  --output_dir /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_dji_action4_test \
   --camera_json /home/zhanght2504/zhanght2504/runspace_yyx5/HCCEPose/dji_action4/camera.json \
   --bbox3d_json /home/zhanght2504/zhanght2504/runspace_yyx5/HCCEPose/dji_action4/bbox8_labels_obj_000001/object_bbox_3d.json \
   --device cuda
+
+
+生成demo视频
+ffmpeg -framerate 2997/100 -i /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_dji_action4_test/%06d_vis.jpg \
+  -vf "pad=ceil(iw/2)*2:ceil(ih/2)*2" \
+  -c:v libx264 -pix_fmt yuv420p \
+  /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_dji_action4_test/demo_vis.mp4
