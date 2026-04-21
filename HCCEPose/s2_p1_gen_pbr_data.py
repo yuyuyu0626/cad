@@ -59,6 +59,15 @@ import mathutils
 from bpy_extras.object_utils import world_to_camera_view
 from collections import defaultdict
 
+PERMUTATIONS = {
+    'xyz': (0, 1, 2),
+    'xzy': (0, 2, 1),
+    'yxz': (1, 0, 2),
+    'yzx': (1, 2, 0),
+    'zxy': (2, 0, 1),
+    'zyx': (2, 1, 0),
+}
+
 def get_3d_bbox(obj):
     """
     获取 Blender 物体的 8 个 3D 顶点 (世界坐标系)
@@ -149,6 +158,110 @@ def load_flat_cc0textures_512(cc_textures_path: str):
 
     return materials
 
+
+def import_textured_obj(filepath: str) -> bpy.types.Object:
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(filepath)
+
+    existing_names = {obj.name for obj in bpy.data.objects}
+    bpy.ops.object.select_all(action='DESELECT')
+    try:
+        bpy.ops.wm.obj_import(filepath=filepath)
+    except Exception:
+        bpy.ops.import_scene.obj(filepath=filepath)
+
+    imported = [obj for obj in bpy.data.objects if obj.name not in existing_names and obj.type == 'MESH']
+    if not imported:
+        raise RuntimeError(f'No mesh objects imported from OBJ: {filepath}')
+
+    if len(imported) > 1:
+        bpy.ops.object.select_all(action='DESELECT')
+        for obj in imported:
+            obj.select_set(True)
+        bpy.context.view_layer.objects.active = imported[0]
+        bpy.ops.object.join()
+        imported = [bpy.context.view_layer.objects.active]
+
+    obj = imported[0]
+    obj.rotation_euler = (0.0, 0.0, 0.0)
+    obj.location = (0.0, 0.0, 0.0)
+    obj.scale = (1.0, 1.0, 1.0)
+    bpy.context.view_layer.update()
+    return obj
+
+
+def _rotation_matrix_from_euler_deg(rotation_deg):
+    euler = mathutils.Euler(tuple(np.deg2rad(rotation_deg).tolist()), 'XYZ')
+    return np.asarray(euler.to_matrix(), dtype=np.float64)
+
+
+def align_render_template_to_model(
+    blender_obj: bpy.types.Object,
+    target_extent: np.ndarray,
+    axis_order: str = 'auto',
+    base_scale: float = 1.0,
+    rotation_deg = (0.0, 0.0, 0.0),
+):
+    mesh = blender_obj.data
+    vertices = np.asarray([v.co[:] for v in mesh.vertices], dtype=np.float64)
+    if vertices.size == 0:
+        raise ValueError('Imported OBJ mesh has no vertices.')
+
+    def evaluate_perm(perm_name: str):
+        perm = PERMUTATIONS[perm_name]
+        verts_perm = vertices[:, perm] * float(base_scale)
+        cur_extent = verts_perm.max(axis=0) - verts_perm.min(axis=0)
+        valid = cur_extent > 1e-9
+        if not np.any(valid):
+            raise ValueError('Imported OBJ mesh extent is degenerate.')
+        uniform_scale = float(np.median(target_extent[valid] / cur_extent[valid]))
+        aligned_extent = cur_extent * uniform_scale
+        score = float(np.linalg.norm(aligned_extent - target_extent))
+        return score, perm, uniform_scale
+
+    if axis_order == 'auto':
+        candidates = [(name, *evaluate_perm(name)) for name in PERMUTATIONS.keys()]
+        best_name, _, best_perm, uniform_scale = min(candidates, key=lambda x: x[1])
+        print(f'[INFO] Auto-selected render axis order: {best_name}')
+    else:
+        _, best_perm, uniform_scale = evaluate_perm(axis_order)
+        best_name = axis_order
+
+    verts_aligned = vertices[:, best_perm] * float(base_scale) * float(uniform_scale)
+    rot = _rotation_matrix_from_euler_deg(rotation_deg)
+    verts_aligned = (rot @ verts_aligned.T).T
+    bbox_min = verts_aligned.min(axis=0)
+    bbox_max = verts_aligned.max(axis=0)
+    bbox_center = 0.5 * (bbox_min + bbox_max)
+    verts_aligned -= bbox_center
+
+    for vertex, coord in zip(mesh.vertices, verts_aligned):
+        vertex.co = mathutils.Vector(coord.tolist())
+    mesh.update()
+    bpy.context.view_layer.update()
+    print(f'[INFO] Render template aligned with axis_order={best_name}, uniform_scale={uniform_scale:.8f}')
+    final_extent = verts_aligned.max(axis=0) - verts_aligned.min(axis=0)
+    print(f'[INFO] Render template final extent: {final_extent.tolist()}')
+
+
+def duplicate_render_template(template_obj: bpy.types.Object, name: str) -> bpy.types.Object:
+    proxy = template_obj.copy()
+    proxy.data = template_obj.data.copy()
+    proxy.animation_data_clear()
+    proxy.name = name
+    bpy.context.collection.objects.link(proxy)
+    proxy.hide_render = False
+    proxy.hide_set(False)
+    return proxy
+
+
+def cleanup_render_proxies(render_proxies):
+    for proxy in render_proxies:
+        mesh = proxy.data
+        bpy.data.objects.remove(proxy, do_unlink=True)
+        if mesh is not None and mesh.users == 0:
+            bpy.data.meshes.remove(mesh, do_unlink=True)
+
 if __name__ == '__main__':
     
     # Retrieve the GPU ID.
@@ -161,6 +274,16 @@ if __name__ == '__main__':
                         help='Number of worker processes used by write_bop() when calculating GT masks/info/coco.')
     parser.add_argument('--num-objects', type=int, default=4,
                         help='Number of object instances spawned per scene.')
+    parser.add_argument('--render-model-obj', type=str, default=None,
+                        help='Optional textured OBJ used only for rendering appearance. BOP PLY is still used for GT/labels.')
+    parser.add_argument('--render-axis-order', choices=['auto'] + sorted(PERMUTATIONS.keys()), default='auto',
+                        help='Axis permutation applied to the textured OBJ before centering/scaling. "auto" matches models_info extent.')
+    parser.add_argument('--render-scale', type=float, default=1.0,
+                        help='Extra uniform scale applied to the textured OBJ before automatic extent matching.')
+    parser.add_argument('--render-rotation-deg', type=float, nargs=3, default=(0.0, 0.0, 0.0),
+                        help='Optional additional XYZ rotation in degrees applied to the textured OBJ after scaling/permutation.')
+    parser.add_argument('--render-model-id', type=int, default=None,
+                        help='Model id used to align the textured OBJ to models_info. Defaults to the only model id when possible.')
     args = parser.parse_args()
     gpu_id = int(args.gpu_id)
 
@@ -200,6 +323,24 @@ if __name__ == '__main__':
         models_ids.append(int(key))
     models_ids = np.array(models_ids)
 
+    render_template = None
+    render_target_extent = None
+    render_model_id = args.render_model_id
+    if args.render_model_obj:
+        if render_model_id is None:
+            if len(models_ids) != 1:
+                raise ValueError('Please pass --render-model-id when dataset contains multiple models.')
+            render_model_id = int(models_ids[0])
+        if str(int(render_model_id)) not in models_info:
+            raise KeyError(f'No models_info entry found for render_model_id={render_model_id}')
+        render_target_extent = np.asarray(
+            [
+                models_info[str(int(render_model_id))]['size_x'],
+                models_info[str(int(render_model_id))]['size_y'],
+                models_info[str(int(render_model_id))]['size_z'],
+            ],
+            dtype=np.float64,
+        )
     # Print the parent path and name of the dataset.
     # 打印数据集的父级路径和名称。
     print('-*' * 10)
@@ -219,6 +360,17 @@ if __name__ == '__main__':
     # Create the rendering scene.
     # 创建渲染场景。
     bproc.init()
+    if args.render_model_obj:
+        render_template = import_textured_obj(args.render_model_obj)
+        align_render_template_to_model(
+            render_template,
+            target_extent=render_target_extent,
+            axis_order=args.render_axis_order,
+            base_scale=args.render_scale,
+            rotation_deg=args.render_rotation_deg,
+        )
+        render_template.hide_render = True
+        render_template.hide_set(True)
     bproc.loader.load_bop_intrinsics(bop_dataset_path = bop_dataset_path)
     room_planes = [bproc.object.create_primitive('PLANE', scale=[2, 2, 1]),
                 bproc.object.create_primitive('PLANE', scale=[2, 2, 1], location=[0, -2, 2], rotation=[-1.570796, 0, 0]),
@@ -287,6 +439,7 @@ if __name__ == '__main__':
                                                     mm2m = True,
                                                     obj_ids = obj_ids,
                                                     )
+        render_proxies = []
         
         # Set object materials and poses, then render 20 frames.
         # 设置物体的材质和位姿，并渲染 20 帧图像。
@@ -325,6 +478,16 @@ if __name__ == '__main__':
                                                         check_object_interval=1,
                                                         substeps_per_frame = 20,
                                                         solver_iters=25)
+
+        if render_template is not None:
+            for proxy_idx, bp_obj in enumerate(sampled_target_bop_objs):
+                proxy = duplicate_render_template(render_template, f'render_proxy_{i:06d}_{proxy_idx:03d}')
+                proxy.matrix_world = bp_obj.blender_obj.matrix_world.copy()
+                render_proxies.append(proxy)
+                bp_obj.blender_obj.hide_render = True
+        else:
+            for bp_obj in sampled_target_bop_objs:
+                bp_obj.blender_obj.hide_render = False
 
         bop_bvh_tree = bproc.object.create_bvh_tree_multi_objects(sampled_target_bop_objs)
 
@@ -402,6 +565,9 @@ if __name__ == '__main__':
         # ==============================================================
         
         for obj in (sampled_target_bop_objs):    
+            obj.blender_obj.hide_render = False
             obj.disable_rigidbody()  
             obj.hide(True)
+        if render_proxies:
+            cleanup_render_proxies(render_proxies)
     pass

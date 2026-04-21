@@ -1,27 +1,28 @@
 # 1) OBJ -> BOP PLY
 python /home/zhanght2504/zhanght2504/runspace_yyx5/utils/convert_obj_to_bop_ply_v2.py \
-  --input_mesh /home/zhanght2504/zhanght2504/runspace_yyx5/head_left_rgb_raw.mp4/Osmo_Action_4.stl \
-  --output_ply /home/zhanght2504/zhanght2504/runspace_yyx5/HCCEPose/dji_action4/models/obj_000001.ply \
-  --axis_order xzy
+  --input_mesh /home/zhanght2504/zhanght2504/runspace_yyx4.5/head_left_rgb_raw.mp4/dji_action4_black.obj \
+  --output_ply /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4/models/obj_000001.ply \
+  --axis_order xyz
 
 # 2) In HCCEPose repo, generate models_info.json
 python /home/zhanght2504/zhanght2504/runspace_yyx5/HCCEPose/s1_p3_obj_infos.py
 
 # 3) Download cc0textures-512 (or full cc0textures), then run HCCEPose PBR rendering
-rm -rf /data/zht_data/zhanght2504/runspace_yyx5/HCCEPose/dji_action4/train_pbr
-rm -rf /data/zht_data/zhanght2504/runspace_yyx5/HCCEPose/dji_action4/custom_keypoints
+rm -rf /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4/train_pbr
+rm -rf /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4/custom_keypoints
 
 cd /data/zht_data/zhanght2504/runspace_yyx5/HCCEPose
 
 ./s2_p1_gen_pbr_data.sh \
-  0 \
-  3 \
+  5 \
+  150 \
   /data/zht_data/zhanght2504/runspace_yyx5/cc0textures-512 \
-  /data/zht_data/zhanght2504/runspace_yyx5/HCCEPose/dji_action4 \
+  /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4 \
   /data/zht_data/zhanght2504/runspace_yyx5/HCCEPose/s2_p1_gen_pbr_data.py \
   --num-scenes 1 \
   --bop-num-worker 1 \
-  --num-objects 1
+  --num-objects 1 \
+  --render-model-obj /home/zhanght2504/zhanght2504/runspace_yyx4.5/head_left_rgb_raw.mp4/dji_action4_black.obj
 
 # 4) Generate 8-corner labels from BOP render result
 python /home/zhanght2504/zhanght2504/runspace_yyx5/utils/gen_bbox8_labels_from_bop.py \
@@ -68,6 +69,14 @@ CUDA_VISIBLE_DEVICES=1 python -m bbox8_pose.infer \
   --bbox3d_json /home/zhanght2504/zhanght2504/runspace_yyx5/HCCEPose/dji_action4/bbox8_labels_obj_000001/object_bbox_3d.json \
   --device cuda
 
+生成demo视频
+ffmpeg -framerate 6 -i /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_boxdreamer_lite_infer/%06d_vis.jpg \
+  -t 20 \
+  -c:v libx264 -pix_fmt yuv420p \
+  /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/demo_videos/demo_infer_vis.mp4
+
+
+
 
 
 # 真实视频测试
@@ -93,7 +102,7 @@ CUDA_VISIBLE_DEVICES=1 python -m bbox8_pose.infer \
 ffmpeg -framerate 2997/100 -i /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_dji_action4_test/%06d_vis.jpg \
   -vf "pad=ceil(iw/2)*2:ceil(ih/2)*2" \
   -c:v libx264 -pix_fmt yuv420p \
-  /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_dji_action4_test/demo_vis.mp4
+  /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_dji_action4_test/demo_real_vis.mp4
 
 
 
@@ -123,3 +132,14 @@ rot_delta_deg / trans_delta
 如果视频本身运动平滑，这些也应该比较平滑
 frame_metrics.csv
 
+
+
+
+python coderepo_other/recongs/render_freeview.py \
+  --point_cloud_dir /home/zhanght2504/zhanght2504/runspace_yyx3/muiti_view_render/recongs/point_cloud \
+  --camera_root /data/zht_data/researchdata/N3DV_processed/cook_spinach \
+  --camera_subdir_pattern "frame{frame:06d}/sparse/0" \
+  --output_dir /home/zhanght2504/zhanght2504/runspace_yyx3/muiti_view_render/recongs/output \
+  --frame_start 2 \
+  --frame_end 2 \
+  --camera_names cam00.png,cam05.png,cam06.png,cam16.png,cam17.png
