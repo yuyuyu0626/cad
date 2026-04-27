@@ -165,14 +165,26 @@ def import_textured_obj(filepath: str) -> bpy.types.Object:
 
     existing_names = {obj.name for obj in bpy.data.objects}
     bpy.ops.object.select_all(action='DESELECT')
-    try:
-        bpy.ops.wm.obj_import(filepath=filepath)
-    except Exception:
-        bpy.ops.import_scene.obj(filepath=filepath)
+    ext = os.path.splitext(filepath)[1].lower()
+
+    if ext == '.obj':
+        try:
+            bpy.ops.wm.obj_import(filepath=filepath)
+        except Exception:
+            bpy.ops.import_scene.obj(filepath=filepath)
+    elif ext in {'.glb', '.gltf'}:
+        bpy.ops.import_scene.gltf(filepath=filepath)
+    elif ext == '.fbx':
+        bpy.ops.import_scene.fbx(filepath=filepath)
+    else:
+        raise ValueError(
+            f'Unsupported render model format: {filepath}. '
+            f'Supported formats are .obj, .glb, .gltf, .fbx'
+        )
 
     imported = [obj for obj in bpy.data.objects if obj.name not in existing_names and obj.type == 'MESH']
     if not imported:
-        raise RuntimeError(f'No mesh objects imported from OBJ: {filepath}')
+        raise RuntimeError(f'No mesh objects imported from render model: {filepath}')
 
     if len(imported) > 1:
         bpy.ops.object.select_all(action='DESELECT')
@@ -180,9 +192,10 @@ def import_textured_obj(filepath: str) -> bpy.types.Object:
             obj.select_set(True)
         bpy.context.view_layer.objects.active = imported[0]
         bpy.ops.object.join()
-        imported = [bpy.context.view_layer.objects.active]
+        active_name = bpy.context.view_layer.objects.active.name
+        imported = [bpy.data.objects[active_name]]
 
-    obj = imported[0]
+    obj = bpy.data.objects[imported[0].name]
     obj.rotation_euler = (0.0, 0.0, 0.0)
     obj.location = (0.0, 0.0, 0.0)
     obj.scale = (1.0, 1.0, 1.0)
@@ -244,9 +257,24 @@ def align_render_template_to_model(
     print(f'[INFO] Render template final extent: {final_extent.tolist()}')
 
 
-def duplicate_render_template(template_obj: bpy.types.Object, name: str) -> bpy.types.Object:
-    proxy = template_obj.copy()
-    proxy.data = template_obj.data.copy()
+def _resolve_object(obj_or_name):
+    if obj_or_name is None:
+        return None
+    if isinstance(obj_or_name, str):
+        return bpy.data.objects.get(obj_or_name)
+    name = getattr(obj_or_name, 'name', None)
+    if name is None:
+        return None
+    return bpy.data.objects.get(name)
+
+
+def duplicate_render_template(template_obj, name: str) -> bpy.types.Object:
+    template = _resolve_object(template_obj)
+    if template is None:
+        raise RuntimeError(f'Render template object is no longer available when creating proxy: {name}')
+
+    proxy = template.copy()
+    proxy.data = template.data.copy()
     proxy.animation_data_clear()
     proxy.name = name
     bpy.context.collection.objects.link(proxy)
@@ -262,6 +290,16 @@ def cleanup_render_proxies(render_proxies):
         if mesh is not None and mesh.users == 0:
             bpy.data.meshes.remove(mesh, do_unlink=True)
 
+
+def cleanup_render_template(template_obj):
+    template = _resolve_object(template_obj)
+    if template is None:
+        return
+    mesh = template.data
+    bpy.data.objects.remove(template, do_unlink=True)
+    if mesh is not None and mesh.users == 0:
+        bpy.data.meshes.remove(mesh, do_unlink=True)
+
 if __name__ == '__main__':
     
     # Retrieve the GPU ID.
@@ -275,7 +313,8 @@ if __name__ == '__main__':
     parser.add_argument('--num-objects', type=int, default=4,
                         help='Number of object instances spawned per scene.')
     parser.add_argument('--render-model-obj', type=str, default=None,
-                        help='Optional textured OBJ used only for rendering appearance. BOP PLY is still used for GT/labels.')
+                        help='Optional textured render model used only for RGB appearance. '
+                             'Supports .obj/.glb/.gltf/.fbx. BOP PLY is still used for GT/labels.')
     parser.add_argument('--render-axis-order', choices=['auto'] + sorted(PERMUTATIONS.keys()), default='auto',
                         help='Axis permutation applied to the textured OBJ before centering/scaling. "auto" matches models_info extent.')
     parser.add_argument('--render-scale', type=float, default=1.0,
@@ -323,7 +362,6 @@ if __name__ == '__main__':
         models_ids.append(int(key))
     models_ids = np.array(models_ids)
 
-    render_template = None
     render_target_extent = None
     render_model_id = args.render_model_id
     if args.render_model_obj:
@@ -360,17 +398,6 @@ if __name__ == '__main__':
     # Create the rendering scene.
     # 创建渲染场景。
     bproc.init()
-    if args.render_model_obj:
-        render_template = import_textured_obj(args.render_model_obj)
-        align_render_template_to_model(
-            render_template,
-            target_extent=render_target_extent,
-            axis_order=args.render_axis_order,
-            base_scale=args.render_scale,
-            rotation_deg=args.render_rotation_deg,
-        )
-        render_template.hide_render = True
-        render_template.hide_set(True)
     bproc.loader.load_bop_intrinsics(bop_dataset_path = bop_dataset_path)
     room_planes = [bproc.object.create_primitive('PLANE', scale=[2, 2, 1]),
                 bproc.object.create_primitive('PLANE', scale=[2, 2, 1], location=[0, -2, 2], rotation=[-1.570796, 0, 0]),
@@ -440,6 +467,8 @@ if __name__ == '__main__':
                                                     obj_ids = obj_ids,
                                                     )
         render_proxies = []
+        render_template = None
+        render_template_name = None
         
         # Set object materials and poses, then render 20 frames.
         # 设置物体的材质和位姿，并渲染 20 帧图像。
@@ -479,9 +508,20 @@ if __name__ == '__main__':
                                                         substeps_per_frame = 20,
                                                         solver_iters=25)
 
-        if render_template is not None:
+        if args.render_model_obj:
+            render_template = import_textured_obj(args.render_model_obj)
+            align_render_template_to_model(
+                render_template,
+                target_extent=render_target_extent,
+                axis_order=args.render_axis_order,
+                base_scale=args.render_scale,
+                rotation_deg=args.render_rotation_deg,
+            )
+            render_template.hide_render = True
+            render_template.hide_set(True)
+            render_template_name = render_template.name
             for proxy_idx, bp_obj in enumerate(sampled_target_bop_objs):
-                proxy = duplicate_render_template(render_template, f'render_proxy_{i:06d}_{proxy_idx:03d}')
+                proxy = duplicate_render_template(render_template_name, f'render_proxy_{i:06d}_{proxy_idx:03d}')
                 proxy.matrix_world = bp_obj.blender_obj.matrix_world.copy()
                 render_proxies.append(proxy)
                 bp_obj.blender_obj.hide_render = True
@@ -570,4 +610,6 @@ if __name__ == '__main__':
             obj.hide(True)
         if render_proxies:
             cleanup_render_proxies(render_proxies)
+        if render_template_name is not None:
+            cleanup_render_template(render_template_name)
     pass

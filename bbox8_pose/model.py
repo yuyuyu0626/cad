@@ -838,6 +838,103 @@ class BoxDreamerLiteDecoder(nn.Module):
         return self.out(q_map)  # 输出细化；(B, dim, H2, W2) -> (B, dim, H2, W2)
 
 
+class TransformerEncoderBlock(nn.Module):
+    """Self-attention block used by the BoxDreamer-style patch decoder."""
+
+    def __init__(self, dim: int, num_heads: int = 8, mlp_ratio: float = 4.0, dropout: float = 0.0) -> None:
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(dim, num_heads=num_heads, dropout=dropout, batch_first=True)
+        self.norm2 = nn.LayerNorm(dim)
+        self.ffn = FeedForward(dim, mlp_ratio=mlp_ratio, dropout=dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_norm = self.norm1(x)
+        x = x + self.attn(x_norm, x_norm, x_norm, need_weights=False)[0]
+        x = x + self.ffn(self.norm2(x))
+        return x
+
+
+class BoxDreamerDecoder(nn.Module):
+    """Patch-token BB8 heatmap decoder following BoxDreamer's BETR design."""
+
+    def __init__(
+        self,
+        c2_channels: int,
+        c3_channels: int,
+        c4_channels: int,
+        num_keypoints: int = 8,
+        dim: int = 192,
+        depth: int = 6,
+        num_heads: int = 8,
+        patch_size: int = 4,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        if patch_size < 1:
+            raise ValueError(f"patch_size must be positive, got {patch_size}")
+        self.dim = dim
+        self.num_keypoints = num_keypoints
+        self.patch_size = patch_size
+
+        self.proj4 = nn.Conv2d(c4_channels, dim, kernel_size=1)
+        self.proj3 = nn.Conv2d(c3_channels, dim, kernel_size=1)
+        self.proj2 = nn.Conv2d(c2_channels, dim, kernel_size=1)
+        self.smooth3 = ConvBnRelu(dim, dim)
+        self.smooth2 = ConvBnRelu(dim, dim)
+
+        self.patch_embed = nn.Conv2d(dim, dim, kernel_size=patch_size, stride=patch_size)
+        self.memory_pool3 = nn.AdaptiveAvgPool2d((8, 8))
+        self.memory_pool4 = nn.AdaptiveAvgPool2d((4, 4))
+        self.bbox_learnable_query = nn.Parameter(torch.zeros(1, 1, dim))
+        self.level_embed = nn.Parameter(torch.zeros(3, 1, dim))
+        self.blocks = nn.ModuleList(
+            [TransformerEncoderBlock(dim=dim, num_heads=num_heads, mlp_ratio=4.0, dropout=dropout) for _ in range(depth)]
+        )
+        self.norm = nn.LayerNorm(dim)
+        self.bbox_proj = nn.Linear(dim, num_keypoints * patch_size * patch_size)
+        nn.init.normal_(self.level_embed, std=0.02)
+
+    def _flatten_with_pos(self, feat: torch.Tensor, level: int) -> torch.Tensor:
+        _, c, h, w = feat.shape
+        tokens = feat.flatten(2).transpose(1, 2)
+        pos = build_2d_sincos_pos_embed(h, w, c, feat.device, feat.dtype)
+        level_embed = self.level_embed[level].to(device=feat.device, dtype=feat.dtype).view(1, 1, c)
+        return tokens + pos + level_embed
+
+    def _unpatchify_heatmaps(self, patches: torch.Tensor, height_tokens: int, width_tokens: int) -> torch.Tensor:
+        b = patches.shape[0]
+        p = self.patch_size
+        k = self.num_keypoints
+        patches = patches.view(b, height_tokens, width_tokens, p, p, k)
+        heatmaps = patches.permute(0, 5, 1, 3, 2, 4).contiguous()
+        return heatmaps.view(b, k, height_tokens * p, width_tokens * p)
+
+    def forward(self, c2: torch.Tensor, c3: torch.Tensor, c4: torch.Tensor) -> torch.Tensor:
+        p4 = self.proj4(c4)
+        p3 = self.proj3(c3) + F.interpolate(p4, size=c3.shape[-2:], mode="bilinear", align_corners=False)
+        p3 = self.smooth3(p3)
+        p2 = self.proj2(c2) + F.interpolate(p3, size=c2.shape[-2:], mode="bilinear", align_corners=False)
+        p2 = self.smooth2(p2)
+
+        patch_map = self.patch_embed(p2)
+        _, _, ht, wt = patch_map.shape
+        query_tokens = self._flatten_with_pos(patch_map, level=0)
+        query_tokens = query_tokens + self.bbox_learnable_query.to(device=p2.device, dtype=p2.dtype)
+        mem3 = self._flatten_with_pos(self.memory_pool3(p3), level=1)
+        mem4 = self._flatten_with_pos(self.memory_pool4(p4), level=2)
+
+        tokens = torch.cat([query_tokens, mem3, mem4], dim=1)
+        for block in self.blocks:
+            tokens = block(tokens)
+        query_tokens = self.norm(tokens[:, : ht * wt])
+        pred_patches = self.bbox_proj(query_tokens)
+        heatmaps = self._unpatchify_heatmaps(pred_patches, ht, wt)
+        if heatmaps.shape[-2:] != p2.shape[-2:]:
+            heatmaps = F.interpolate(heatmaps, size=p2.shape[-2:], mode="bilinear", align_corners=False)
+        return heatmaps
+
+
 class BBox8PoseNet(nn.Module):
     """
     summary
@@ -883,6 +980,7 @@ class BBox8PoseNet(nn.Module):
         decoder_dim: int = 192,
         decoder_depth: int = 3,
         decoder_heads: int = 8,
+        decoder_patch_size: int = 4,
     ) -> None:
         """
         summary
@@ -917,6 +1015,7 @@ class BBox8PoseNet(nn.Module):
         super().__init__()
         self.backbone_name = backbone
         self.decoder_name = decoder
+        self.head = None
 
         if backbone == "simple":
             self.backbone = SimpleBackbone(base_channels=base_channels)
@@ -950,9 +1049,22 @@ class BBox8PoseNet(nn.Module):
                 num_heads=decoder_heads,
             )
             head_in_channels = decoder_dim
+        elif decoder == "boxdreamer":
+            self.neck = BoxDreamerDecoder(
+                c2_channels=c2,
+                c3_channels=c3,
+                c4_channels=c4,
+                num_keypoints=num_keypoints,
+                dim=decoder_dim,
+                depth=decoder_depth,
+                num_heads=decoder_heads,
+                patch_size=decoder_patch_size,
+            )
+            head_in_channels = None
         else:
             raise ValueError(f"Unsupported decoder: {decoder}")
-        self.head = HeatmapHead(head_in_channels, num_keypoints)
+        if head_in_channels is not None:
+            self.head = HeatmapHead(head_in_channels, num_keypoints)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -995,4 +1107,6 @@ class BBox8PoseNet(nn.Module):
             feat = self.neck["smooth2"](p2)  # feat表示: FPN 最终高分辨率特征；维度为 (B, 128, H2, W2)
         else:
             feat = self.neck(c2, c3, c4)  # feat表示: BoxDreamerLite 解码器输出的融合特征；维度通常为 (B, decoder_dim, H2, W2)
+        if self.head is None:
+            return feat
         return self.head(feat)  # 关键点热图预测；(B, C_feat, H2, W2) -> (B, K, H2, W2)

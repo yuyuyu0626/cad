@@ -4,6 +4,12 @@ python /home/zhanght2504/zhanght2504/runspace_yyx5/utils/convert_obj_to_bop_ply_
   --output_ply /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4/models/obj_000001.ply \
   --axis_order xyz
 
+python /home/zhanght2504/zhanght2504/runspace_yyx5/utils/convert_obj_to_bop_ply_v2.py \
+  --input_mesh /home/zhanght2504/zhanght2504/runspace_yyx4.5/head_left_rgb_raw.mp4/dji_actions4_pbr/dj_actions4.obj \
+  --output_ply /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_actions_pbr/models/obj_000001.ply \
+  --axis_order xyz
+
+
 # 2) In HCCEPose repo, generate models_info.json
 python /home/zhanght2504/zhanght2504/runspace_yyx5/HCCEPose/s1_p3_obj_infos.py
 
@@ -26,7 +32,7 @@ cd /data/zht_data/zhanght2504/runspace_yyx5/HCCEPose
 
 # 4) Generate 8-corner labels from BOP render result
 python /home/zhanght2504/zhanght2504/runspace_yyx5/utils/gen_bbox8_labels_from_bop.py \
-  --dataset_root /home/zhanght2504/zhanght2504/runspace_yyx5/HCCEPose/dji_action4 \
+  --dataset_root /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4 \
   --obj_id 1 \
   --folder_name train_pbr \
   --visib_thresh 0.1 \
@@ -38,9 +44,9 @@ python /home/zhanght2504/zhanght2504/runspace_yyx5/utils/gen_bbox8_labels_from_b
 cd /data/zht_data/zhanght2504/runspace_yyx5
 
 python -m bbox8_pose.train \
-  --labels_root /home/zhanght2504/zhanght2504/runspace_yyx5/HCCEPose/dji_action4/bbox8_labels_obj_000001 \
+  --labels_root /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4/bbox8_labels_obj_000001 \
   --output_dir /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_obj_000001_boxdreamer_lite \
-  --epochs 80 \
+  --epochs 50 \
   --batch_size 8 \
   --num_workers 4 \
   --lr 3e-4 \
