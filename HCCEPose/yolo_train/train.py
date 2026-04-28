@@ -24,7 +24,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 print(current_dir)
 
-def train_yolo11(task, data_path, gpu_num, epochs, imgsz, batch, pretrained_weights=None):
+def train_yolo11(task, data_path, gpu_num, epochs, imgsz, batch, pretrained_weights=None, amp=False):
     """
     Train YOLO11 for a specific task ("detection" or "segmentation")
     using Ultralytics YOLO with a single object class.
@@ -96,6 +96,7 @@ def train_yolo11(task, data_path, gpu_num, epochs, imgsz, batch, pretrained_weig
         auto_augment = 'AugMix',
         freeze=0, 
         multi_scale=True,
+        amp=amp,
     )
     save_dir = os.path.join(os.path.dirname(os.path.dirname(data_path)), task_suffix, f"obj_s")
     os.makedirs(save_dir, exist_ok=True)
@@ -121,6 +122,7 @@ def main():
         default=None,
         help="YOLO pretrained weights name or local .pt path. Defaults to yolo11x.pt for detection.",
     )
+    parser.add_argument("--amp", action="store_true", help="Enable Ultralytics AMP training checks.")
 
     args = parser.parse_args()
 
@@ -133,6 +135,7 @@ def main():
         imgsz=args.imgsz,
         batch=args.batch,
         pretrained_weights=args.pretrained_weights,
+        amp=args.amp,
     )
 
 

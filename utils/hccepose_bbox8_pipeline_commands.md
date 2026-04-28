@@ -135,6 +135,21 @@ ffmpeg -framerate 6 -i /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8
 
 
 
+# (kexuan)使用yolo生成标记图
+cd /data/zht_data/zhanght2504/runspace_yyx5/HCCEPose
+
+python s3_p1_prepare_yolo_label.py \
+  --dataset_path /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4
+
+python s3_p2_train_yolo.py \
+  --dataset_path /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4 \
+  --gpu_num 1 \
+  --epochs 100 \
+  --imgsz 640 \
+  --pretrained_weights /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4/yolo11/yolo11n.pt
+
+
+
 
 
 # 真实视频测试
@@ -212,3 +227,5 @@ python coderepo_other/recongs/render_freeview.py \
   --frame_start 2 \
   --frame_end 2 \
   --camera_names cam00.png,cam05.png,cam06.png,cam16.png,cam17.png
+
+
