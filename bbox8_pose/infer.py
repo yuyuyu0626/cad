@@ -36,6 +36,12 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--crop_margin", type=float, default=0.15, help="Relative padding around each input bbox.")
+    parser.add_argument("--yolo_model", default=None, help="Optional Ultralytics YOLO model for automatic object bboxes.")
+    parser.add_argument("--yolo_conf", type=float, default=0.25)
+    parser.add_argument("--yolo_iou", type=float, default=0.7)
+    parser.add_argument("--yolo_imgsz", type=int, default=960)
+    parser.add_argument("--yolo_max_det", type=int, default=20)
+    parser.add_argument("--yolo_classes", default=None, help="Optional comma-separated YOLO class ids to keep.")
     return parser.parse_args()
 
 
@@ -143,7 +149,7 @@ def boxes_for_image(image_path: str, bbox_map: Dict[str, List[List[float]]], inl
 
 
 def expand_box(box: Sequence[float], width: int, height: int, margin: float) -> List[int]:
-    x1, y1, x2, y2 = [float(v) for v in box[:4]]
+    x1, y1, x2, y2 = box_xyxy(box)
     if x2 < x1:
         x1, x2 = x2, x1
     if y2 < y1:
@@ -158,6 +164,66 @@ def expand_box(box: Sequence[float], width: int, height: int, margin: float) -> 
     if x2 <= x1 or y2 <= y1:
         raise ValueError(f"Invalid expanded bbox: {box}")
     return [x1, y1, x2, y2]
+
+
+def box_xyxy(box) -> List[float]:
+    if isinstance(box, dict):
+        box = box.get("bbox", box.get("xyxy"))
+    if box is None or len(box) < 4:
+        raise ValueError(f"Invalid bbox: {box}")
+    return [float(box[0]), float(box[1]), float(box[2]), float(box[3])]
+
+
+def parse_yolo_classes(spec: Optional[str]) -> Optional[List[int]]:
+    if spec is None or spec.strip() == "":
+        return None
+    return [int(item.strip()) for item in spec.split(",") if item.strip()]
+
+
+def load_yolo_model(path: Optional[str]):
+    if not path:
+        return None
+    try:
+        from ultralytics import YOLO
+    except ImportError as exc:
+        raise ImportError("Using --yolo_model requires the ultralytics package in this environment.") from exc
+    return YOLO(path)
+
+
+def detect_yolo_boxes(yolo_model, image_rgb: np.ndarray, args: argparse.Namespace) -> List[Dict]:
+    if yolo_model is None:
+        return []
+    classes = parse_yolo_classes(args.yolo_classes)
+    device_arg = 0 if str(args.device).startswith("cuda") else "cpu"
+    results = yolo_model.predict(
+        image_rgb,
+        conf=args.yolo_conf,
+        iou=args.yolo_iou,
+        imgsz=args.yolo_imgsz,
+        max_det=args.yolo_max_det,
+        classes=classes,
+        device=device_arg,
+        verbose=False,
+    )
+    if not results:
+        return []
+    boxes_obj = results[0].boxes
+    if boxes_obj is None or len(boxes_obj) == 0:
+        return []
+    xyxy = boxes_obj.xyxy.detach().cpu().numpy()
+    conf = boxes_obj.conf.detach().cpu().numpy() if boxes_obj.conf is not None else np.ones((xyxy.shape[0],), dtype=np.float32)
+    cls = boxes_obj.cls.detach().cpu().numpy() if boxes_obj.cls is not None else np.full((xyxy.shape[0],), -1, dtype=np.float32)
+    detections = []
+    for box, score, cls_id in zip(xyxy, conf, cls):
+        detections.append(
+            {
+                "bbox": [float(box[0]), float(box[1]), float(box[2]), float(box[3])],
+                "score": float(score),
+                "class_id": int(cls_id),
+            }
+        )
+    detections.sort(key=lambda item: (item["bbox"][0], item["bbox"][1]))
+    return detections
 
 
 def infer_one_image(model, image_rgb: np.ndarray, args: argparse.Namespace, device: torch.device) -> np.ndarray:
@@ -204,6 +270,7 @@ def main() -> None:
     model.load_state_dict(ckpt["model"])
     model.to(device)
     model.eval()
+    yolo_model = load_yolo_model(args.yolo_model)
 
     image_paths = collect_images(args.input)
     camera_K = load_camera_matrix(args.camera_json) if args.camera_json else None
@@ -223,6 +290,8 @@ def main() -> None:
         valid_mask = np.ones(8, dtype=np.float32)
 
         boxes = boxes_for_image(image_path, bbox_map, inline_boxes)
+        if not boxes and yolo_model is not None:
+            boxes = detect_yolo_boxes(yolo_model, image_rgb, args)
         instances = []
         if boxes:
             for box in boxes:
@@ -235,9 +304,14 @@ def main() -> None:
                 pred_xy_orig[:, 1] = y1 + pred_xy_orig[:, 1] * ((y2 - y1) / float(args.image_height))
                 inst = {
                     "bbox": [float(x1), float(y1), float(x2), float(y2)],
-                    "input_bbox": [float(v) for v in box[:4]],
+                    "input_bbox": box_xyxy(box),
                     "corners_2d": pred_xy_orig.tolist(),
                 }
+                if isinstance(box, dict):
+                    if "score" in box:
+                        inst["det_score"] = float(box["score"])
+                    if "class_id" in box:
+                        inst["det_class_id"] = int(box["class_id"])
                 if camera_K is not None and corners_3d is not None:
                     pnp = solve_pnp_from_bbox8(corners_3d, pred_xy_orig, camera_K, valid_mask)
                     if pnp is not None:

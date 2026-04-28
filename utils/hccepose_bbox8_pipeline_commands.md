@@ -65,6 +65,55 @@ python -m bbox8_pose.train \
   --vis_every 1 \
   --vis_num_samples 4
 
+带有坐标辅助损失的train
+python -m bbox8_pose.train \
+  --labels_root /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4/bbox8_labels_obj_000001 \
+  --output_dir /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_obj_000001_lite_coord \
+  --epochs 50 \
+  --batch_size 8 \
+  --num_workers 4 \
+  --lr 3e-4 \
+  --image_width 384 \
+  --image_height 384 \
+  --heatmap_width 96 \
+  --heatmap_height 96 \
+  --sigma 2.5 \
+  --device cuda \
+  --backbone resnet18 \
+  --decoder boxdreamer_lite \
+  --decoder_dim 192 \
+  --decoder_depth 3 \
+  --decoder_heads 8 \
+  --coord_loss_weight 0.05 \
+  --coord_softargmax_temp 0.05 \
+  --vis_every 1 \
+  --vis_num_samples 4
+
+python -m bbox8_pose.train \
+  --labels_root /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4/bbox8_labels_obj_000001 \
+  --output_dir /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_obj_000001_lite_coord \
+  --epochs 50 \
+  --batch_size 8 \
+  --num_workers 4 \
+  --lr 3e-4 \
+  --image_width 384 \
+  --image_height 384 \
+  --heatmap_width 96 \
+  --heatmap_height 96 \
+  --sigma 2.5 \
+  --device cuda \
+  --backbone resnet18 \
+  --decoder boxdreamer \
+  --decoder_dim 192 \
+  --decoder_depth 3 \
+  --decoder_heads 8 \
+  --decoder_patch_size 4 \
+  --coord_loss_weight 0.05 \
+  --coord_softargmax_temp 0.05 \
+  --vis_every 1 \
+  --vis_num_samples 4
+
+
 
 
 
