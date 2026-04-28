@@ -18,13 +18,50 @@ We added several augmentation strategies to enhance YOLO's performance.
 import os
 import sys
 import argparse
+import math
+import random
+import torch.nn as nn
 from ultralytics import YOLO
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 print(current_dir)
 
-def train_yolo11(task, data_path, gpu_num, epochs, imgsz, batch, pretrained_weights=None, amp=False):
+
+def patch_safe_multiscale_preprocess():
+    """Patch Ultralytics multi-scale resize to avoid zero output sizes.
+
+    Some Ultralytics/PyTorch combinations can produce a zero dimension in the
+    dynamic multi-scale target size, which then crashes inside
+    torch.nn.functional.interpolate with ZeroDivisionError. This keeps the same
+    multi-scale behavior but clamps target dimensions to at least one stride.
+    """
+    from ultralytics.models.yolo.detect.train import DetectionTrainer
+
+    if getattr(DetectionTrainer, "_hccepose_safe_multiscale", False):
+        return
+
+    def preprocess_batch(self, batch):
+        batch["img"] = batch["img"].to(self.device, non_blocking=True).float() / 255
+        if self.args.multi_scale:
+            imgs = batch["img"]
+            stride = int(getattr(self, "stride", 32) or 32)
+            min_size = max(stride, int(math.floor(float(self.args.imgsz) * 0.5 / stride)) * stride)
+            max_size = max(min_size, int(math.ceil(float(self.args.imgsz) * 1.5 / stride)) * stride)
+            size = random.randrange(min_size, max_size + stride, stride)
+            scale = size / max(imgs.shape[2:])
+            if scale != 1:
+                ns = [
+                    max(stride, int(math.ceil(dim * scale / stride)) * stride)
+                    for dim in imgs.shape[2:]
+                ]
+                batch["img"] = nn.functional.interpolate(imgs, size=ns, mode="bilinear", align_corners=False)
+        return batch
+
+    DetectionTrainer.preprocess_batch = preprocess_batch
+    DetectionTrainer._hccepose_safe_multiscale = True
+
+def train_yolo11(task, data_path, gpu_num, epochs, imgsz, batch, pretrained_weights=None, amp=False, multi_scale=False):
     """
     Train YOLO11 for a specific task ("detection" or "segmentation")
     using Ultralytics YOLO with a single object class.
@@ -66,6 +103,8 @@ def train_yolo11(task, data_path, gpu_num, epochs, imgsz, batch, pretrained_weig
     else:
         model = YOLO(pretrained_weights)
         resume = False
+    if multi_scale:
+        patch_safe_multiscale_preprocess()
     model.train(
         data=data_path,
         epochs=epochs,
@@ -95,7 +134,7 @@ def train_yolo11(task, data_path, gpu_num, epochs, imgsz, batch, pretrained_weig
         dropout = 0.2,
         auto_augment = 'AugMix',
         freeze=0, 
-        multi_scale=True,
+        multi_scale=multi_scale,
         amp=amp,
     )
     save_dir = os.path.join(os.path.dirname(os.path.dirname(data_path)), task_suffix, f"obj_s")
@@ -123,6 +162,7 @@ def main():
         help="YOLO pretrained weights name or local .pt path. Defaults to yolo11x.pt for detection.",
     )
     parser.add_argument("--amp", action="store_true", help="Enable Ultralytics AMP training checks.")
+    parser.add_argument("--multi_scale", action="store_true", help="Enable Ultralytics multi-scale training.")
 
     args = parser.parse_args()
 
@@ -136,6 +176,7 @@ def main():
         batch=args.batch,
         pretrained_weights=args.pretrained_weights,
         amp=args.amp,
+        multi_scale=args.multi_scale,
     )
 
 

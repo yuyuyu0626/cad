@@ -172,13 +172,16 @@ CUDA_VISIBLE_DEVICES=1 python -m bbox8_pose.infer \
 
 CUDA_VISIBLE_DEVICES=1 python -m bbox8_pose.infer \
   --checkpoint /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_obj_000001_boxdreamer/best.pt \
-  --input /home/zhanght2504/zhanght2504/runspace_yyx4.5/test_video_frames/000001.jpg \
-  --output_dir /home/zhanght2504/zhanght2504/runspace_yyx4.5/outputs/bbox8_pose_dji_action4_test_crop \
+  --input /home/zhanght2504/zhanght2504/runspace_yyx4.5/test_video_frames \
+  --output_dir /home/zhanght2504/zhanght2504/runspace_yyx4.5/outputs/bbox8_pose_dji_action4_test_auto \
   --camera_json /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4/camera.json \
   --bbox3d_json /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4/bbox8_labels_obj_000001/object_bbox_3d.json \
-  --bboxes "560,560,1010,900;1180,590,1570,900" \
+  --yolo_model /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4/yolo11/train_obj_s/detection/obj_s/yolo11-detection-obj_s.pt \
+  --yolo_conf 0.25 \
+  --yolo_imgsz 960 \
   --crop_margin 0.2 \
   --device cuda
+
 
 
 

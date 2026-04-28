@@ -27,6 +27,7 @@ def parse_args() -> argparse.Namespace:
         help="YOLO pretrained weights name or local .pt path. Defaults to yolo11x.pt for detection.",
     )
     parser.add_argument("--amp", action="store_true", help="Enable Ultralytics AMP training checks.")
+    parser.add_argument("--multi_scale", action="store_true", help="Enable Ultralytics multi-scale training.")
     parser.add_argument(
         "--skip_if_exists",
         action="store_true",
@@ -84,6 +85,8 @@ def main() -> None:
         cmd.extend(["--pretrained_weights", args.pretrained_weights])
     if args.amp:
         cmd.append("--amp")
+    if args.multi_scale:
+        cmd.append("--multi_scale")
     print("[INFO] Running:", " ".join(cmd))
     subprocess.run(cmd, check=True)
     print(f"[INFO] Expected exported YOLO model: {model_path}")

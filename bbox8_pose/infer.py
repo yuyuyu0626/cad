@@ -42,6 +42,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--yolo_imgsz", type=int, default=960)
     parser.add_argument("--yolo_max_det", type=int, default=20)
     parser.add_argument("--yolo_classes", default=None, help="Optional comma-separated YOLO class ids to keep.")
+    parser.add_argument(
+        "--no_full_image_fallback",
+        action="store_true",
+        help="If no manual/YOLO boxes are found, skip the image instead of predicting one full-image instance.",
+    )
     return parser.parse_args()
 
 
@@ -292,6 +297,7 @@ def main() -> None:
         boxes = boxes_for_image(image_path, bbox_map, inline_boxes)
         if not boxes and yolo_model is not None:
             boxes = detect_yolo_boxes(yolo_model, image_rgb, args)
+            print(f"[INFO] {os.path.basename(image_path)}: YOLO detected {len(boxes)} boxes")
         instances = []
         if boxes:
             for box in boxes:
@@ -317,7 +323,11 @@ def main() -> None:
                     if pnp is not None:
                         inst.update(pnp)
                 instances.append(inst)
+        elif args.no_full_image_fallback:
+            print(f"[WARN] {os.path.basename(image_path)}: no boxes found, skipped full-image fallback")
         else:
+            if yolo_model is not None:
+                print(f"[WARN] {os.path.basename(image_path)}: no YOLO boxes found, using full-image fallback")
             pred_xy = infer_one_image(model, image_rgb, args, device)
             scale_x = orig_w / float(args.image_width)
             scale_y = orig_h / float(args.image_height)
