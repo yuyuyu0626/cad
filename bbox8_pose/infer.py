@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 from .heatmap import decode_heatmaps_argmax
+from .dataset import transform_corners_from_crop
 from .model import BBox8PoseNet
 from .utils import draw_corners, ensure_dir, save_json, solve_pnp_from_bbox8
 
@@ -35,7 +36,7 @@ def parse_args() -> argparse.Namespace:
             "Each box can be [x1,y1,x2,y2] or {'bbox':[x1,y1,x2,y2]}."
         ),
     )
-    parser.add_argument("--crop_margin", type=float, default=0.15, help="Relative padding around each input bbox.")
+    parser.add_argument("--crop_margin", type=float, default=None, help="Relative padding around each input bbox. Defaults to checkpoint crop_margin when available.")
     parser.add_argument("--yolo_model", default=None, help="Optional Ultralytics YOLO model for automatic object bboxes.")
     parser.add_argument("--yolo_conf", type=float, default=0.25)
     parser.add_argument("--yolo_iou", type=float, default=0.7)
@@ -262,6 +263,8 @@ def main() -> None:
     ckpt_args = ckpt.get("args", {})
     args.image_width = ckpt_args.get("image_width", args.image_width)
     args.image_height = ckpt_args.get("image_height", args.image_height)
+    if args.crop_margin is None:
+        args.crop_margin = float(ckpt_args.get("crop_margin", 0.15))
     model = BBox8PoseNet(
         backbone=ckpt_args.get("backbone", "resnet18"),
         pretrained_backbone=False,
@@ -305,9 +308,7 @@ def main() -> None:
                 x1, y1, x2, y2 = crop_box
                 crop_rgb = image_rgb[y1:y2, x1:x2]
                 pred_xy = infer_one_image(model, crop_rgb, args, device)
-                pred_xy_orig = pred_xy.copy()
-                pred_xy_orig[:, 0] = x1 + pred_xy_orig[:, 0] * ((x2 - x1) / float(args.image_width))
-                pred_xy_orig[:, 1] = y1 + pred_xy_orig[:, 1] * ((y2 - y1) / float(args.image_height))
+                pred_xy_orig = transform_corners_from_crop(pred_xy, crop_box, (args.image_width, args.image_height))
                 inst = {
                     "bbox": [float(x1), float(y1), float(x2), float(y2)],
                     "input_bbox": box_xyxy(box),
@@ -328,12 +329,10 @@ def main() -> None:
         else:
             if yolo_model is not None:
                 print(f"[WARN] {os.path.basename(image_path)}: no YOLO boxes found, using full-image fallback")
+            if ckpt_args.get("crop_to_bbox", False):
+                print(f"[WARN] {os.path.basename(image_path)}: checkpoint was crop-trained; full-image fallback is distribution-mismatched")
             pred_xy = infer_one_image(model, image_rgb, args, device)
-            scale_x = orig_w / float(args.image_width)
-            scale_y = orig_h / float(args.image_height)
-            pred_xy_orig = pred_xy.copy()
-            pred_xy_orig[:, 0] *= scale_x
-            pred_xy_orig[:, 1] *= scale_y
+            pred_xy_orig = transform_corners_from_crop(pred_xy, (0, 0, orig_w, orig_h), (args.image_width, args.image_height))
             inst = {
                 "bbox": None,
                 "corners_2d": pred_xy_orig.tolist(),

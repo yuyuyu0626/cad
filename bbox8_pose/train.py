@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from .dataset import BBox8PoseDataset, collate_bbox8
+from .dataset import BBox8PoseDataset, collate_bbox8, transform_corners_from_crop
 from .heatmap import decode_heatmaps_argmax, decode_heatmaps_softargmax
 from .losses import WeightedHeatmapMSELoss
 from .metrics import corner_l2_error
@@ -87,6 +87,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--decoder_patch_size", type=int, default=4)
     parser.add_argument("--coord_loss_weight", type=float, default=0.0)
     parser.add_argument("--coord_softargmax_temp", type=float, default=0.05)
+    parser.add_argument("--crop_to_bbox", action="store_true", help="Train/validate on GT bbox crops instead of whole images.")
+    parser.add_argument("--crop_margin", type=float, default=0.15, help="Relative crop padding around GT corner bbox.")
+    parser.add_argument("--crop_jitter", type=float, default=0.0, help="Randomize crop padding during training, e.g. 0.2.")
     parser.add_argument("--vis_every", type=int, default=1, help="Export validation visualizations every N epochs.")
     parser.add_argument("--vis_num_samples", type=int, default=4, help="Number of validation samples to visualize.")
     return parser.parse_args()
@@ -138,6 +141,9 @@ def build_dataloaders(args: argparse.Namespace) -> Dict[str, DataLoader]:
         heatmap_size=heatmap_size,
         sigma=args.sigma,
         augment=True,
+        crop_to_bbox=args.crop_to_bbox,
+        crop_margin=args.crop_margin,
+        crop_jitter=args.crop_jitter,
     )
     val_set = BBox8PoseDataset(
         labels_root=args.labels_root,
@@ -146,6 +152,9 @@ def build_dataloaders(args: argparse.Namespace) -> Dict[str, DataLoader]:
         heatmap_size=heatmap_size,
         sigma=args.sigma,
         augment=False,
+        crop_to_bbox=args.crop_to_bbox,
+        crop_margin=args.crop_margin,
+        crop_jitter=0.0,
     )
     return {
         "train": DataLoader(
@@ -369,9 +378,12 @@ def export_val_visualizations(model, dataset, device, image_size, output_dir, ep
             continue
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)  # image_rgb表示: 转为 RGB 顺序后的原图；(H0, W0, 3)；便于后续可视化函数使用
         orig_h, orig_w = image_rgb.shape[:2]  # orig_h / orig_w表示: 原图高宽；标量整数；由磁盘读取的真实图像大小决定
-        pred_xy_orig = pred_xy.copy()  # pred_xy_orig表示: 将要映射回原图坐标系的预测角点副本；维度为 (K, 2)
-        pred_xy_orig[:, 0] *= orig_w / float(image_size[0])  #* 将 x 坐标从网络输入宽度尺度映射到原图宽度尺度；列 0 仍表示所有角点的 x 坐标
-        pred_xy_orig[:, 1] *= orig_h / float(image_size[1])  #* 将 y 坐标从网络输入高度尺度映射到原图高度尺度；列 1 仍表示所有角点的 y 坐标
+        crop_box = sample.get("crop_box")
+        if crop_box is None:
+            crop_box_np = (0.0, 0.0, float(orig_w), float(orig_h))
+        else:
+            crop_box_np = tuple(crop_box.cpu().numpy().tolist())
+        pred_xy_orig = transform_corners_from_crop(pred_xy, crop_box_np, image_size)
         gt_xy_orig = sample["corners_xy_orig"].cpu().numpy()  # gt_xy_orig表示: 原图坐标系下的真值角点；通常为 (K, 2)；无需再次缩放
 
         #! draw_corners: 外部可视化函数；将角点和有效掩码叠加到 RGB 图像上，返回绘制后的图像
