@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from .dataset import BBox8PoseDataset, collate_bbox8
-from .heatmap import decode_heatmaps_argmax
+from .heatmap import decode_heatmaps_argmax, decode_heatmaps_softargmax
 from .losses import WeightedHeatmapMSELoss
 from .metrics import corner_l2_error
 from .model import BBox8PoseNet
@@ -85,6 +85,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--decoder_depth", type=int, default=3)
     parser.add_argument("--decoder_heads", type=int, default=8)
     parser.add_argument("--decoder_patch_size", type=int, default=4)
+    parser.add_argument("--coord_loss_weight", type=float, default=0.0)
+    parser.add_argument("--coord_softargmax_temp", type=float, default=0.05)
     parser.add_argument("--vis_every", type=int, default=1, help="Export validation visualizations every N epochs.")
     parser.add_argument("--vis_num_samples", type=int, default=4, help="Number of validation samples to visualize.")
     return parser.parse_args()
@@ -165,7 +167,30 @@ def build_dataloaders(args: argparse.Namespace) -> Dict[str, DataLoader]:
     }
 
 
-def run_epoch(model, loader, criterion, optimizer, device, image_size, train: bool):
+def masked_normalized_l1_coord_loss(
+    pred_xy: torch.Tensor,
+    gt_xy: torch.Tensor,
+    valid_mask: torch.Tensor,
+    image_size,
+) -> torch.Tensor:
+    scale = pred_xy.new_tensor([float(image_size[0]), float(image_size[1])]).view(1, 1, 2)
+    diff = (pred_xy - gt_xy).abs() / scale
+    weights = valid_mask.float().unsqueeze(-1)
+    denom = weights.sum().clamp_min(1.0) * 2.0
+    return (diff * weights).sum() / denom
+
+
+def run_epoch(
+    model,
+    loader,
+    criterion,
+    optimizer,
+    device,
+    image_size,
+    train: bool,
+    coord_loss_weight: float = 0.0,
+    coord_softargmax_temp: float = 0.05,
+):
     """
     summary
         执行一个完整的训练或验证轮次，并返回平均损失与平均角点 L2 误差。
@@ -231,7 +256,16 @@ def run_epoch(model, loader, criterion, optimizer, device, image_size, train: bo
             # 再次啰嗦一嘴
             # critieon传入的是MSE均方误差
             # 也就是计算预测热图和真是热图之间的平均平方差
-            loss = criterion(pred_heatmaps, target_heatmaps, valid_mask)  # loss表示: 当前 batch 的监督损失；标量张量；通常综合热图误差与有效掩码
+            heatmap_loss = criterion(pred_heatmaps, target_heatmaps, valid_mask)
+            loss = heatmap_loss
+            if coord_loss_weight > 0:
+                pred_xy_soft = decode_heatmaps_softargmax(
+                    pred_heatmaps,
+                    image_size=image_size,
+                    temperature=coord_softargmax_temp,
+                )
+                coord_loss = masked_normalized_l1_coord_loss(pred_xy_soft, gt_xy, valid_mask, image_size)
+                loss = loss + float(coord_loss_weight) * coord_loss
             if train:
                 optimizer.zero_grad(set_to_none=True)  #* 清空历史梯度；set_to_none=True 可减少不必要的内存写入，通常更高效
                 loss.backward()  #* 反向传播当前 batch 的损失，计算模型参数梯度
@@ -411,8 +445,28 @@ def main() -> None:
 
     # * 接下来这段代码执行标准训练主循环：先训练、再验证、再更新调度器，随后保存日志、checkpoint 与可视化结果
     for epoch in range(1, args.epochs + 1):
-        train_stats = run_epoch(model, loaders["train"], criterion, optimizer, device, image_size, train=True)  # train_stats表示: 当前 epoch 的训练统计；字典；至少含 loss 与 mean_corner_l2
-        val_stats = run_epoch(model, loaders["val"], criterion, optimizer, device, image_size, train=False)  # val_stats表示: 当前 epoch 的验证统计；字典；至少含 loss 与 mean_corner_l2
+        train_stats = run_epoch(
+            model,
+            loaders["train"],
+            criterion,
+            optimizer,
+            device,
+            image_size,
+            train=True,
+            coord_loss_weight=args.coord_loss_weight,
+            coord_softargmax_temp=args.coord_softargmax_temp,
+        )  # train_stats表示: 当前 epoch 的训练统计；字典；至少含 loss 与 mean_corner_l2
+        val_stats = run_epoch(
+            model,
+            loaders["val"],
+            criterion,
+            optimizer,
+            device,
+            image_size,
+            train=False,
+            coord_loss_weight=0.0,
+            coord_softargmax_temp=args.coord_softargmax_temp,
+        )  # val_stats表示: 当前 epoch 的验证统计；字典；至少含 loss 与 mean_corner_l2
         scheduler.step()  #* 在每个 epoch 末尾推进一次学习率调度器
 
         epoch_stats = {

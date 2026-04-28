@@ -45,7 +45,7 @@ cd /data/zht_data/zhanght2504/runspace_yyx5
 
 python -m bbox8_pose.train \
   --labels_root /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4/bbox8_labels_obj_000001 \
-  --output_dir /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_obj_000001_boxdreamer_lite \
+  --output_dir /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_obj_000001_boxdreamer \
   --epochs 50 \
   --batch_size 8 \
   --num_workers 4 \
@@ -57,22 +57,25 @@ python -m bbox8_pose.train \
   --sigma 2.5 \
   --device cuda \
   --backbone resnet18 \
-  --decoder boxdreamer_lite \
+  --decoder boxdreamer \
   --decoder_dim 192 \
-  --decoder_depth 3 \
+  --decoder_depth 6 \
   --decoder_heads 8 \
+  --decoder_patch_size 4 \
   --vis_every 1 \
   --vis_num_samples 4
+
+
 
 
 
 # 训练后验证
 CUDA_VISIBLE_DEVICES=1 python -m bbox8_pose.infer \
   --checkpoint /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_obj_000001_boxdreamer_lite/best_metric.pt \
-  --input /home/zhanght2504/zhanght2504/runspace_yyx5/HCCEPose/dji_action4/train_pbr/000000/rgb \
+  --input /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4/train_pbr/000001/rgb \
   --output_dir /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_boxdreamer_lite_infer \
-  --camera_json /home/zhanght2504/zhanght2504/runspace_yyx5/HCCEPose/dji_action4/camera.json \
-  --bbox3d_json /home/zhanght2504/zhanght2504/runspace_yyx5/HCCEPose/dji_action4/bbox8_labels_obj_000001/object_bbox_3d.json \
+  --camera_json /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4/camera.json \
+  --bbox3d_json /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4/bbox8_labels_obj_000001/object_bbox_3d.json \
   --device cuda
 
 生成demo视频
@@ -87,21 +90,32 @@ ffmpeg -framerate 6 -i /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8
 
 # 真实视频测试
 抽帧
-mkdir -p /home/zhanght2504/zhanght2504/runspace_yyx5/test_video_frames
+mkdir -p /home/zhanght2504/zhanght2504/runspace_yyx4.5/test_video_frames
 
-ffmpeg -i /home/zhanght2504/zhanght2504/runspace_yyx5/head_left_rgb_raw.mp4/head_left_rgb_raw.mp4 \
+ffmpeg -i /home/zhanght2504/zhanght2504/runspace_yyx4.5/head_left_rgb_raw.mp4/head_left_rgb_raw.mp4 \
   -qscale:v 2 \
-  /home/zhanght2504/zhanght2504/runspace_yyx5/test_video_frames/%06d.jpg
+  /home/zhanght2504/zhanght2504/runspace_yyx4.5/test_video_frames/%06d.jpg
 
 
 推理
 CUDA_VISIBLE_DEVICES=1 python -m bbox8_pose.infer \
-  --checkpoint /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_obj_000001_boxdreamer_lite/best_metric.pt \
-  --input /home/zhanght2504/zhanght2504/runspace_yyx5/test_video_frames \
-  --output_dir /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_dji_action4_test \
-  --camera_json /home/zhanght2504/zhanght2504/runspace_yyx5/HCCEPose/dji_action4/camera.json \
-  --bbox3d_json /home/zhanght2504/zhanght2504/runspace_yyx5/HCCEPose/dji_action4/bbox8_labels_obj_000001/object_bbox_3d.json \
+  --checkpoint /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_obj_000001_boxdreamer/best.pt \
+  --input /home/zhanght2504/zhanght2504/runspace_yyx4.5/test_video_frames \
+  --output_dir /home/zhanght2504/zhanght2504/runspace_yyx4.5/outputs/bbox8_pose_dji_action4_test \
+  --camera_json /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4/camera.json \
+  --bbox3d_json /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4/bbox8_labels_obj_000001/object_bbox_3d.json \
   --device cuda
+
+CUDA_VISIBLE_DEVICES=1 python -m bbox8_pose.infer \
+  --checkpoint /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_obj_000001_boxdreamer/best.pt \
+  --input /home/zhanght2504/zhanght2504/runspace_yyx4.5/test_video_frames/000001.jpg \
+  --output_dir /home/zhanght2504/zhanght2504/runspace_yyx4.5/outputs/bbox8_pose_dji_action4_test_crop \
+  --camera_json /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4/camera.json \
+  --bbox3d_json /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4/bbox8_labels_obj_000001/object_bbox_3d.json \
+  --bboxes "560,560,1010,900;1180,590,1570,900" \
+  --crop_margin 0.2 \
+  --device cuda
+
 
 
 生成demo视频
