@@ -892,7 +892,11 @@ class BoxDreamerDecoder(nn.Module):
             [TransformerEncoderBlock(dim=dim, num_heads=num_heads, mlp_ratio=4.0, dropout=dropout) for _ in range(depth)]
         )
         self.norm = nn.LayerNorm(dim)
-        self.bbox_proj = nn.Linear(dim, num_keypoints * patch_size * patch_size)
+        self.feature_proj = nn.Linear(dim, dim * patch_size * patch_size)
+        self.out = nn.Sequential(
+            ConvBnRelu(dim, dim),
+            ConvBnRelu(dim, dim),
+        )
         nn.init.normal_(self.level_embed, std=0.02)
 
     def _flatten_with_pos(self, feat: torch.Tensor, level: int) -> torch.Tensor:
@@ -902,13 +906,13 @@ class BoxDreamerDecoder(nn.Module):
         level_embed = self.level_embed[level].to(device=feat.device, dtype=feat.dtype).view(1, 1, c)
         return tokens + pos + level_embed
 
-    def _unpatchify_heatmaps(self, patches: torch.Tensor, height_tokens: int, width_tokens: int) -> torch.Tensor:
+    def _unpatchify_features(self, patches: torch.Tensor, height_tokens: int, width_tokens: int) -> torch.Tensor:
         b = patches.shape[0]
         p = self.patch_size
-        k = self.num_keypoints
-        patches = patches.view(b, height_tokens, width_tokens, p, p, k)
-        heatmaps = patches.permute(0, 5, 1, 3, 2, 4).contiguous()
-        return heatmaps.view(b, k, height_tokens * p, width_tokens * p)
+        d = self.dim
+        patches = patches.view(b, height_tokens, width_tokens, p, p, d)
+        feat = patches.permute(0, 5, 1, 3, 2, 4).contiguous()
+        return feat.view(b, d, height_tokens * p, width_tokens * p)
 
     def forward(self, c2: torch.Tensor, c3: torch.Tensor, c4: torch.Tensor) -> torch.Tensor:
         p4 = self.proj4(c4)
@@ -928,11 +932,11 @@ class BoxDreamerDecoder(nn.Module):
         for block in self.blocks:
             tokens = block(tokens)
         query_tokens = self.norm(tokens[:, : ht * wt])
-        pred_patches = self.bbox_proj(query_tokens)
-        heatmaps = self._unpatchify_heatmaps(pred_patches, ht, wt)
-        if heatmaps.shape[-2:] != p2.shape[-2:]:
-            heatmaps = F.interpolate(heatmaps, size=p2.shape[-2:], mode="bilinear", align_corners=False)
-        return heatmaps
+        feature_patches = self.feature_proj(query_tokens)
+        query_map = self._unpatchify_features(feature_patches, ht, wt)
+        if query_map.shape[-2:] != p2.shape[-2:]:
+            query_map = F.interpolate(query_map, size=p2.shape[-2:], mode="bilinear", align_corners=False)
+        return self.out(query_map + p2)
 
 
 class BBox8PoseNet(nn.Module):
@@ -1060,7 +1064,7 @@ class BBox8PoseNet(nn.Module):
                 num_heads=decoder_heads,
                 patch_size=decoder_patch_size,
             )
-            head_in_channels = None
+            head_in_channels = decoder_dim
         else:
             raise ValueError(f"Unsupported decoder: {decoder}")
         if head_in_channels is not None:
