@@ -22,6 +22,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch", type=int, default=None, help="Defaults to 12 * gpu_num.")
     parser.add_argument("--task", choices=["detection", "segmentation"], default="detection")
     parser.add_argument(
+        "--pretrained_weights",
+        default=None,
+        help="YOLO pretrained weights name or local .pt path. Defaults to yolo11x.pt for detection.",
+    )
+    parser.add_argument(
         "--skip_if_exists",
         action="store_true",
         help="Skip training if the final exported YOLO model already exists.",
@@ -74,6 +79,8 @@ def main() -> None:
         "--task",
         args.task,
     ]
+    if args.pretrained_weights:
+        cmd.extend(["--pretrained_weights", args.pretrained_weights])
     print("[INFO] Running:", " ".join(cmd))
     subprocess.run(cmd, check=True)
     print(f"[INFO] Expected exported YOLO model: {model_path}")

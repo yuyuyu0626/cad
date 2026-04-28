@@ -20,9 +20,37 @@ while this modified version supports training a single YOLO model for multiple o
 import os
 import json
 import shutil
+import random
 from tqdm import tqdm
 from PIL import Image 
-from ultralytics.data.utils import autosplit
+
+
+def write_autosplit_files(images_dir, weights=(0.95, 0.05, 0.0), seed=0):
+    image_names = [
+        name for name in sorted(os.listdir(images_dir))
+        if os.path.splitext(name.lower())[1] in {".jpg", ".jpeg", ".png", ".bmp"}
+    ]
+    rng = random.Random(seed)
+    rng.shuffle(image_names)
+
+    total = len(image_names)
+    train_count = int(round(total * weights[0]))
+    val_count = int(round(total * weights[1]))
+    if train_count + val_count > total:
+        val_count = max(0, total - train_count)
+
+    splits = {
+        "autosplit_train.txt": image_names[:train_count],
+        "autosplit_val.txt": image_names[train_count:train_count + val_count],
+        "autosplit_test.txt": image_names[train_count + val_count:],
+    }
+    output_root = os.path.dirname(images_dir)
+    for filename, names in splits.items():
+        path = os.path.join(output_root, filename)
+        with open(path, "w", encoding="utf-8") as f:
+            for name in names:
+                f.write(os.path.join(images_dir, name) + "\n")
+        print(f"[INFO] Wrote {len(names)} images to {path}")
 
 def convert_train_pbr_2_yolo(train_pbr_path, output_path, obj_id_list):
     '''
@@ -131,11 +159,7 @@ def convert_train_pbr_2_yolo(train_pbr_path, output_path, obj_id_list):
                         assert 0 <= width <= 1 and 0 <= height <= 1
                         id_ = str(obj_id_list.index(obj_id))
                         lf.write(f"{id_} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}\n")
-    autosplit( 
-            path=images_dir,
-            weights=(1.00, 0.05, 0.0),
-            annotated_only=False 
-        )
+    write_autosplit_files(images_dir, weights=(0.95, 0.05, 0.0))
 
 def generate_yaml(output_path, obj_id_list):
     

@@ -24,7 +24,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 print(current_dir)
 
-def train_yolo11(task, data_path, gpu_num, epochs, imgsz, batch):
+def train_yolo11(task, data_path, gpu_num, epochs, imgsz, batch, pretrained_weights=None):
     """
     Train YOLO11 for a specific task ("detection" or "segmentation")
     using Ultralytics YOLO with a single object class.
@@ -46,10 +46,10 @@ def train_yolo11(task, data_path, gpu_num, epochs, imgsz, batch):
         device.append(i_)
     
     if task == "detection":
-        pretrained_weights = "yolo11x.pt"
+        pretrained_weights = pretrained_weights or "yolo11x.pt"
         task_suffix = "detection"
     elif task == "segmentation":
-        pretrained_weights = "yolo11n-seg.pt"
+        pretrained_weights = pretrained_weights or "yolo11n-seg.pt"
         task_suffix = "segmentation"
     else:
         print("Invalid task. Must be 'detection' or 'segmentation'.")
@@ -115,6 +115,12 @@ def main():
     parser.add_argument("--gpu_num", type=int, default=1, help="Number of GPUs.")
     parser.add_argument("--task", type=str, choices=["detection", "segmentation"], default="detection",
                         help="Task type (detection or segmentation).")
+    parser.add_argument(
+        "--pretrained_weights",
+        type=str,
+        default=None,
+        help="YOLO pretrained weights name or local .pt path. Defaults to yolo11x.pt for detection.",
+    )
 
     args = parser.parse_args()
 
@@ -125,7 +131,8 @@ def main():
         # obj_id=args.obj_id,
         epochs=args.epochs,
         imgsz=args.imgsz,
-        batch=args.batch
+        batch=args.batch,
+        pretrained_weights=args.pretrained_weights,
     )
 
 
