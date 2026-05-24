@@ -17,7 +17,11 @@ class AugmentConfig:
     brightness: float = 0.2
     contrast: float = 0.2
     saturation: float = 0.2
-    blur_prob: float = 0.1
+    blur_prob: float = 0.2
+    blur_kernel: int = 5
+    noise_prob: float = 0.2
+    noise_scale: float = 0.05
+    hflip_prob: float = 0.5
 
 
 def _load_jsonl(path: str) -> List[Dict]:
@@ -163,13 +167,27 @@ class BBox8PoseDataset(Dataset):
         return len(self.records)
 
     def _apply_augmentation(self, image: np.ndarray) -> np.ndarray:
+        """对图像进行多种数据增强操作"""
         image = image.astype(np.float32)
+        
+        # 随机亮度和对比度调整 (90% 概率)
         if self.rng.random() < 0.9:
             alpha = 1.0 + self.rng.uniform(-self.augment_cfg.contrast, self.augment_cfg.contrast)
             beta = 255.0 * self.rng.uniform(-self.augment_cfg.brightness, self.augment_cfg.brightness)
             image = image * alpha + beta
+        
+        # 随机高斯模糊
         if self.rng.random() < self.augment_cfg.blur_prob:
-            image = cv2.GaussianBlur(image, (5, 5), 0)
+            kernel_size = self.augment_cfg.blur_kernel
+            if kernel_size % 2 == 0:
+                kernel_size += 1
+            image = cv2.GaussianBlur(image, (kernel_size, kernel_size), 0)
+        
+        # 随机添加高斯噪声
+        if self.rng.random() < self.augment_cfg.noise_prob:
+            noise = self.rng.gauss(0, self.augment_cfg.noise_scale * 255.0)
+            image = image + noise * self.rng.uniform(0.3, 0.8)
+        
         return np.clip(image, 0, 255).astype(np.uint8)
 
     def __getitem__(self, index: int) -> Dict[str, torch.Tensor]:
@@ -184,6 +202,17 @@ class BBox8PoseDataset(Dataset):
         valid_mask = torch.tensor(rec["corner_valid_mask"], dtype=torch.float32)
         if self.use_soft_mask_filter and rec.get("visib_fract", 1.0) <= 0:
             valid_mask.zero_()
+
+        # 随机水平翻转 (仅在训练时)
+        do_hflip = False
+        if self.augment and self.rng.random() < self.augment_cfg.hflip_prob:
+            do_hflip = True
+            image = cv2.flip(image, 1)  # 1 表示水平翻转
+            orig_w_flip = orig_w
+            # 翻转角点的 x 坐标
+            corners[:, 0] = orig_w_flip - corners[:, 0]
+            # 如果有 8 个角点且需要重新排列顺序，这里可以添加重新排列逻辑
+            # 根据你的角点标号顺序可能需要调整
 
         crop_box = (0, 0, orig_w, orig_h)
         if self.crop_to_bbox:

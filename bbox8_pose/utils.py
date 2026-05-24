@@ -17,7 +17,28 @@ def save_json(path: str, obj: Dict) -> None:
         json.dump(obj, f, indent=2, ensure_ascii=False)
 
 
-def draw_corners(image_rgb: np.ndarray, corners_xy: np.ndarray, valid_mask: Optional[np.ndarray] = None) -> np.ndarray:
+BBOX8_EDGES = [
+    (2, 3),
+    (3, 0),
+    (0, 1),
+    (1, 2),
+    (6, 7),
+    (7, 4),
+    (4, 5),
+    (5, 6),
+    (2, 6),
+    (3, 7),
+    (0, 4),
+    (1, 5),
+]
+
+
+def draw_corners(
+    image_rgb: np.ndarray,
+    corners_xy: np.ndarray,
+    valid_mask: Optional[np.ndarray] = None,
+    draw_edges: bool = True,
+) -> np.ndarray:
     canvas = image_rgb.copy()
     colors = [
         (255, 0, 0),
@@ -29,6 +50,15 @@ def draw_corners(image_rgb: np.ndarray, corners_xy: np.ndarray, valid_mask: Opti
         (255, 128, 0),
         (128, 0, 255),
     ]
+    if draw_edges and len(corners_xy) >= 8:
+        for a, b in BBOX8_EDGES:
+            if valid_mask is not None and (valid_mask[a] <= 0 or valid_mask[b] <= 0):
+                continue
+            pa = corners_xy[a]
+            pb = corners_xy[b]
+            p1 = (int(round(pa[0])), int(round(pa[1])))
+            p2 = (int(round(pb[0])), int(round(pb[1])))
+            cv2.line(canvas, p1, p2, (255, 80, 20), 4, cv2.LINE_AA)
     for idx, pt in enumerate(corners_xy):
         if valid_mask is not None and valid_mask[idx] <= 0:
             continue
@@ -36,6 +66,45 @@ def draw_corners(image_rgb: np.ndarray, corners_xy: np.ndarray, valid_mask: Opti
         cv2.circle(canvas, (x, y), 4, colors[idx], -1)
         cv2.putText(canvas, str(idx), (x + 4, y - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, colors[idx], 1, cv2.LINE_AA)
     return canvas
+
+
+def draw_bbox8_edges(
+    image_rgb: np.ndarray,
+    corners_xy: np.ndarray,
+    valid_mask: Optional[np.ndarray] = None,
+    color: tuple = (255, 80, 20),
+    thickness: int = 4,
+) -> np.ndarray:
+    canvas = image_rgb.copy()
+    if len(corners_xy) < 8:
+        return canvas
+    for a, b in BBOX8_EDGES:
+        if valid_mask is not None and (valid_mask[a] <= 0 or valid_mask[b] <= 0):
+            continue
+        pa = corners_xy[a]
+        pb = corners_xy[b]
+        p1 = (int(round(pa[0])), int(round(pa[1])))
+        p2 = (int(round(pb[0])), int(round(pb[1])))
+        cv2.line(canvas, p1, p2, color, thickness, cv2.LINE_AA)
+    return canvas
+
+
+def project_bbox8_from_pose(
+    corners_3d: np.ndarray,
+    cam_R_m2c: np.ndarray,
+    cam_t_m2c: np.ndarray,
+    camera_K: np.ndarray,
+) -> np.ndarray:
+    rvec, _ = cv2.Rodrigues(np.asarray(cam_R_m2c, dtype=np.float32).reshape(3, 3))
+    tvec = np.asarray(cam_t_m2c, dtype=np.float32).reshape(3, 1)
+    projected, _ = cv2.projectPoints(
+        objectPoints=np.asarray(corners_3d, dtype=np.float32),
+        rvec=rvec,
+        tvec=tvec,
+        cameraMatrix=np.asarray(camera_K, dtype=np.float32).reshape(3, 3),
+        distCoeffs=None,
+    )
+    return projected.reshape(-1, 2)
 
 
 def solve_pnp_from_bbox8(

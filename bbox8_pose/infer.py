@@ -10,7 +10,7 @@ import torch
 from .heatmap import decode_heatmaps_argmax
 from .dataset import transform_corners_from_crop
 from .model import BBox8PoseNet
-from .utils import draw_corners, ensure_dir, save_json, solve_pnp_from_bbox8
+from .utils import draw_corners, ensure_dir, project_bbox8_from_pose, save_json, solve_pnp_from_bbox8
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,6 +34,14 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Optional JSON mapping image basename/stem/path to boxes. "
             "Each box can be [x1,y1,x2,y2] or {'bbox':[x1,y1,x2,y2]}."
+        ),
+    )
+    parser.add_argument(
+        "--reference_corners",
+        default=None,
+        help=(
+            "Optional prior corner predictions/labels used only to derive crop boxes. "
+            "Accepts an infer output directory, one JSON file, or annotations-style JSONL."
         ),
     )
     parser.add_argument("--crop_margin", type=float, default=None, help="Relative padding around each input bbox. Defaults to checkpoint crop_margin when available.")
@@ -154,6 +162,134 @@ def boxes_for_image(image_path: str, bbox_map: Dict[str, List[List[float]]], inl
     return []
 
 
+def corners_to_box(corners, valid_mask=None) -> List[float]:
+    pts = np.asarray(corners, dtype=np.float32)
+    if pts.ndim != 2 or pts.shape[1] < 2:
+        raise ValueError(f"Invalid corners_2d shape: {pts.shape}")
+    if valid_mask is not None:
+        valid = np.asarray(valid_mask, dtype=np.float32) > 0
+        if valid.shape[0] == pts.shape[0] and int(valid.sum()) >= 2:
+            pts = pts[valid]
+    x1 = float(np.min(pts[:, 0]))
+    y1 = float(np.min(pts[:, 1]))
+    x2 = float(np.max(pts[:, 0]))
+    y2 = float(np.max(pts[:, 1]))
+    return [x1, y1, x2, y2]
+
+
+def add_reference_boxes(box_map: Dict[str, List[List[float]]], keys: List[str], boxes: List[List[float]]) -> None:
+    if not boxes:
+        return
+    for key in keys:
+        if key:
+            box_map.setdefault(str(key), []).extend(boxes)
+
+
+def reference_keys_from_path(path: Optional[str]) -> List[str]:
+    if not path:
+        return []
+    base = os.path.basename(path)
+    stem = os.path.splitext(base)[0]
+    return [os.path.abspath(path), path, base, stem]
+
+
+def boxes_from_reference_record(record: Dict) -> List[List[float]]:
+    boxes = []
+    instances = record.get("instances")
+    if isinstance(instances, list):
+        for inst in instances:
+            if not isinstance(inst, dict):
+                continue
+            if "corners_2d" in inst:
+                boxes.append(corners_to_box(inst["corners_2d"], inst.get("corner_valid_mask")))
+            elif "bbox" in inst and inst["bbox"] is not None:
+                boxes.append(box_xyxy(inst["bbox"]))
+            elif "input_bbox" in inst and inst["input_bbox"] is not None:
+                boxes.append(box_xyxy(inst["input_bbox"]))
+    elif "corners_2d" in record:
+        boxes.append(corners_to_box(record["corners_2d"], record.get("corner_valid_mask")))
+    elif "bbox" in record and record["bbox"] is not None:
+        boxes.append(box_xyxy(record["bbox"]))
+    elif "input_bbox" in record and record["input_bbox"] is not None:
+        boxes.append(box_xyxy(record["input_bbox"]))
+    return boxes
+
+
+def load_reference_corners(path: Optional[str]) -> Dict[str, List[List[float]]]:
+    if not path:
+        return {}
+    if os.path.isdir(path):
+        box_map: Dict[str, List[List[float]]] = {}
+        for name in sorted(os.listdir(path)):
+            if not name.lower().endswith(".json"):
+                continue
+            if name.endswith("_vis.json"):
+                continue
+            json_path = os.path.join(path, name)
+            with open(json_path, "r", encoding="utf-8") as f:
+                record = json.load(f)
+            boxes = boxes_from_reference_record(record)
+            stem = os.path.splitext(name)[0]
+            keys = [name, stem]
+            keys.extend(reference_keys_from_path(record.get("image_path")))
+            add_reference_boxes(box_map, keys, boxes)
+        return box_map
+
+    box_map = {}
+    if path.lower().endswith(".jsonl"):
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                record = json.loads(line)
+                boxes = boxes_from_reference_record(record)
+                keys = []
+                for path_key in ("image_path", "rgb_path", "path", "file_name"):
+                    keys.extend(reference_keys_from_path(record.get(path_key)))
+                sample_id = record.get("sample_id")
+                if sample_id is not None:
+                    keys.append(str(sample_id))
+                add_reference_boxes(box_map, keys, boxes)
+        return box_map
+
+    with open(path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+    if isinstance(raw, dict):
+        if "instances" in raw or "corners_2d" in raw:
+            boxes = boxes_from_reference_record(raw)
+            keys = reference_keys_from_path(raw.get("image_path"))
+            if not keys:
+                keys = ["*"]
+            add_reference_boxes(box_map, keys, boxes)
+            return box_map
+        for key, value in raw.items():
+            if isinstance(value, dict):
+                boxes = boxes_from_reference_record(value)
+            else:
+                boxes = normalize_boxes(value)
+            add_reference_boxes(box_map, [str(key)], boxes)
+        return box_map
+    if isinstance(raw, list):
+        has_records = any(isinstance(item, dict) and ("instances" in item or "corners_2d" in item) for item in raw)
+        if has_records:
+            for record in raw:
+                if not isinstance(record, dict):
+                    continue
+                boxes = boxes_from_reference_record(record)
+                keys = []
+                for path_key in ("image_path", "rgb_path", "path", "file_name"):
+                    keys.extend(reference_keys_from_path(record.get(path_key)))
+                sample_id = record.get("sample_id")
+                if sample_id is not None:
+                    keys.append(str(sample_id))
+                add_reference_boxes(box_map, keys, boxes)
+        else:
+            add_reference_boxes(box_map, ["*"], normalize_boxes(raw))
+        return box_map
+    raise ValueError("--reference_corners must be a directory, JSON file, or JSONL file")
+
+
 def expand_box(box: Sequence[float], width: int, height: int, margin: float) -> List[int]:
     x1, y1, x2, y2 = box_xyxy(box)
     if x2 < x1:
@@ -244,13 +380,9 @@ def infer_one_image(model, image_rgb: np.ndarray, args: argparse.Namespace, devi
 
 def draw_instances(image_rgb: np.ndarray, instances: List[Dict]) -> np.ndarray:
     canvas = image_rgb.copy()
-    for inst_idx, inst in enumerate(instances):
-        box = inst.get("bbox")
-        if box is not None:
-            x1, y1, x2, y2 = [int(round(v)) for v in box]
-            cv2.rectangle(canvas, (x1, y1), (x2, y2), (80, 220, 80), 2)
-            cv2.putText(canvas, f"inst {inst_idx}", (x1, max(0, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (80, 220, 80), 2)
-        canvas = draw_corners(canvas, np.asarray(inst["corners_2d"], dtype=np.float32), np.ones(8, dtype=np.float32))
+    for inst in instances:
+        raw_corners = np.asarray(inst["corners_2d"], dtype=np.float32)
+        canvas = draw_corners(canvas, raw_corners, np.ones(8, dtype=np.float32), draw_edges=True)
     return canvas
 
 
@@ -284,6 +416,7 @@ def main() -> None:
     camera_K = load_camera_matrix(args.camera_json) if args.camera_json else None
     inline_boxes = parse_inline_bboxes(args.bboxes)
     bbox_map = load_bboxes_json(args.bboxes_json)
+    reference_bbox_map = load_reference_corners(args.reference_corners)
     corners_3d = None
     if args.bbox3d_json:
         with open(args.bbox3d_json, "r", encoding="utf-8") as f:
@@ -298,6 +431,10 @@ def main() -> None:
         valid_mask = np.ones(8, dtype=np.float32)
 
         boxes = boxes_for_image(image_path, bbox_map, inline_boxes)
+        if not boxes:
+            boxes = boxes_for_image(image_path, reference_bbox_map, [])
+            if boxes:
+                print(f"[INFO] {os.path.basename(image_path)}: reference corners provided {len(boxes)} boxes")
         if not boxes and yolo_model is not None:
             boxes = detect_yolo_boxes(yolo_model, image_rgb, args)
             print(f"[INFO] {os.path.basename(image_path)}: YOLO detected {len(boxes)} boxes")
@@ -323,6 +460,13 @@ def main() -> None:
                     pnp = solve_pnp_from_bbox8(corners_3d, pred_xy_orig, camera_K, valid_mask)
                     if pnp is not None:
                         inst.update(pnp)
+                        projected = project_bbox8_from_pose(
+                            corners_3d,
+                            np.asarray(pnp["cam_R_m2c"], dtype=np.float32).reshape(3, 3),
+                            np.asarray(pnp["cam_t_m2c"], dtype=np.float32),
+                            camera_K,
+                        )
+                        inst["projected_corners_2d"] = projected.tolist()
                 instances.append(inst)
         elif args.no_full_image_fallback:
             print(f"[WARN] {os.path.basename(image_path)}: no boxes found, skipped full-image fallback")
@@ -341,6 +485,13 @@ def main() -> None:
                 pnp = solve_pnp_from_bbox8(corners_3d, pred_xy_orig, camera_K, valid_mask)
                 if pnp is not None:
                     inst.update(pnp)
+                    projected = project_bbox8_from_pose(
+                        corners_3d,
+                        np.asarray(pnp["cam_R_m2c"], dtype=np.float32).reshape(3, 3),
+                        np.asarray(pnp["cam_t_m2c"], dtype=np.float32),
+                        camera_K,
+                    )
+                    inst["projected_corners_2d"] = projected.tolist()
             instances.append(inst)
 
         result = {

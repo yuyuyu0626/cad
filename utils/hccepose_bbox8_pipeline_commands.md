@@ -148,6 +148,73 @@ python s3_p2_train_yolo.py \
   --imgsz 640 \
   --pretrained_weights /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4/yolo11/yolo11n.pt
 
+## 使用真实标注数据训练yolo
+安装labelme，进行标记
+
+pip install labelme
+labelme C:\Users\喻艺欣\.vscode\cad\real_yolo\images_all --output C:\Users\喻艺欣\.vscode\cad\real_yolo\labelme_json
+
+然后分为训练和测试集，同时标记数据转为.txt格式。
+
+
+上传到服务器
+执行
+cat > /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4/yolo11/train_obj_s/yolo_configs/data_objs_pbr_real.yaml <<'YAML'
+path: /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4
+
+train:
+  - yolo11/train_obj_s/autosplit_train.txt
+  - real_yolo/images/train
+
+val:
+  - yolo11/train_obj_s/autosplit_val.txt
+  - real_yolo/images/val
+
+names:
+  0: dji_action4
+YAML
+
+
+用PBR训练好的YOLO继续微调
+cd /data/zht_data/zhanght2504/runspace_yyx5/HCCEPose
+
+python s3_p2_train_yolo.py \
+  --data_path /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4/yolo11/train_obj_s/yolo_configs/data_objs_pbr_real.yaml \
+  --gpu_num 1 \
+  --epochs 50 \
+  --imgsz 1280 \
+  --batch 8 \
+  --pretrained_weights /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4/yolo11/train_obj_s/detection/obj_s/yolo11-detection-obj_s.pt
+
+
+测试框框效果
+yolo predict \
+  model=/data/zht_data/zhanght2504/runspace_yyx4.5/dji_action4/yolo11/train_obj_s/train-5/weights/best.pt \
+  source=/home/zhanght2504/zhanght2504/runspace_yyx4.5/test_video_frames \
+  imgsz=1280 \
+  conf=0.6 \
+  iou=0.25 \
+  max_det=2 \
+  save=True \
+  project=/home/zhanght2504/zhanght2504/runspace_yyx4.5/outputs/yolo_real_check \
+  name=pbr_real_finetune
+
+正式测试
+CUDA_VISIBLE_DEVICES=1 python -m bbox8_pose.infer \
+  --checkpoint /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_obj_000001_crop_boxdreamer_lite_crop/best_metric.pt \
+  --input /home/zhanght2504/zhanght2504/runspace_yyx4.5/test_video_frames \
+  --output_dir /home/zhanght2504/zhanght2504/runspace_yyx4.5/outputs/bbox8_pose_dji_action4_test_crop_real_yolo \
+  --camera_json /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4/camera.json \
+  --bbox3d_json /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4/bbox8_labels_obj_000001/object_bbox_3d.json \
+  --yolo_model /data/zht_data/zhanght2504/runspace_yyx4.5/dji_action4/yolo11/train_obj_s/train-5/weights/best.pt \
+  --yolo_conf 0.6 \
+  --yolo_iou 0.25 \
+  --yolo_imgsz 1280 \
+  --yolo_max_det 2 \
+  --crop_margin 0.05 \
+  --no_full_image_fallback \
+  --device cuda
+
 
 
 
@@ -231,4 +298,35 @@ python coderepo_other/recongs/render_freeview.py \
   --frame_end 2 \
   --camera_names cam00.png,cam05.png,cam06.png,cam16.png,cam17.png
 
+
+
+
+
+# 使用crop后再训练
+cd /data/zht_data/zhanght2504/runspace_yyx5
+
+python -m bbox8_pose.train \
+  --labels_root /home/zhanght2504/zhanght2504/runspace_yyx4.5/dji_action4/bbox8_labels_obj_000001 \
+  --output_dir /home/zhanght2504/zhanght2504/runspace_yyx5/outputs/bbox8_pose_obj_000001_boxdreamer_lite_crop_m040_j020 \
+  --epochs 50 \
+  --batch_size 8 \
+  --num_workers 4 \
+  --lr 3e-4 \
+  --image_width 384 \
+  --image_height 384 \
+  --heatmap_width 96 \
+  --heatmap_height 96 \
+  --sigma 2.5 \
+  --device cuda \
+  --backbone resnet18 \
+  --decoder boxdreamer_lite \
+  --decoder_dim 192 \
+  --decoder_depth 3 \
+  --decoder_heads 8 \
+  --crop_to_bbox \
+  --crop_margin 0.4 \
+  --crop_jitter 0.2 \
+  --coord_loss_weight 0.05 \
+  --vis_every 1 \
+  --vis_num_samples 4
 

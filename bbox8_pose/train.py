@@ -92,6 +92,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--crop_jitter", type=float, default=0.0, help="Randomize crop padding during training, e.g. 0.2.")
     parser.add_argument("--vis_every", type=int, default=1, help="Export validation visualizations every N epochs.")
     parser.add_argument("--vis_num_samples", type=int, default=4, help="Number of validation samples to visualize.")
+    parser.add_argument("--init_checkpoint", default=None, help="Optional checkpoint to initialize model weights before training.")
     return parser.parse_args()
 
 
@@ -445,6 +446,10 @@ def main() -> None:
         decoder_heads=args.decoder_heads,
         decoder_patch_size=args.decoder_patch_size,
     ).to(device)
+    if args.init_checkpoint:
+        ckpt = torch.load(args.init_checkpoint, map_location="cpu")
+        model.load_state_dict(ckpt["model"])
+        print(f"[INFO] initialized model from {args.init_checkpoint}")
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)  # optimizer表示: Adam 优化器；负责根据梯度更新模型参数
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)  # scheduler表示: 余弦退火学习率调度器；在 epochs 范围内平滑衰减学习率
     #! WeightedHeatmapMSELoss: 外部损失函数；通常对预测热图和目标热图做加权 MSE，并结合有效掩码忽略无效位置

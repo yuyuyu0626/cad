@@ -2,3 +2,15 @@
 *.mp4
 __pycache__/
 *.pyc
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.pdf
+*.docx
+*.xlsx
+*.pptx
+**/target_frames/**
+**/test_video_frames/**
+*.md
+**/real_yolo/**
