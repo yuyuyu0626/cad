@@ -57,7 +57,7 @@ def generate_corner_heatmaps(
 def decode_heatmaps_argmax(heatmaps: torch.Tensor, image_size: Tuple[int, int]) -> torch.Tensor:
     # 根据热图解码出2d角点坐标
     batch, channels, hm_h, hm_w = heatmaps.shape
-    flat_idx = heatmaps.view(batch, channels, -1).argmax(dim=-1)
+    flat_idx = heatmaps.reshape(batch, channels, -1).argmax(dim=-1)
     ys = (flat_idx // hm_w).float()
     xs = (flat_idx % hm_w).float()
 
@@ -73,7 +73,7 @@ def decode_heatmaps_softargmax(
     temperature: float = 1.0,
 ) -> torch.Tensor:
     batch, channels, hm_h, hm_w = heatmaps.shape
-    probs = torch.softmax(heatmaps.view(batch, channels, -1) / temperature, dim=-1)
+    probs = torch.softmax(heatmaps.reshape(batch, channels, -1) / temperature, dim=-1)
 
     xs = torch.linspace(0, image_size[0], hm_w, device=heatmaps.device, dtype=heatmaps.dtype)
     ys = torch.linspace(0, image_size[1], hm_h, device=heatmaps.device, dtype=heatmaps.dtype)

@@ -90,6 +90,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--crop_to_bbox", action="store_true", help="Train/validate on GT bbox crops instead of whole images.")
     parser.add_argument("--crop_margin", type=float, default=0.15, help="Relative crop padding around GT corner bbox.")
     parser.add_argument("--crop_jitter", type=float, default=0.0, help="Randomize crop padding during training, e.g. 0.2.")
+    parser.add_argument("--dynamic_input", action="store_true", help="Resize each crop with its original aspect ratio instead of forcing a square input.")
+    parser.add_argument("--dynamic_min_size", type=int, default=128, help="Minimum dynamic crop side before batching padding.")
+    parser.add_argument("--dynamic_size_multiple", type=int, default=32, help="Round dynamic crop sides to this multiple.")
     parser.add_argument("--vis_every", type=int, default=1, help="Export validation visualizations every N epochs.")
     parser.add_argument("--vis_num_samples", type=int, default=4, help="Number of validation samples to visualize.")
     parser.add_argument("--init_checkpoint", default=None, help="Optional checkpoint to initialize model weights before training.")
@@ -145,6 +148,9 @@ def build_dataloaders(args: argparse.Namespace) -> Dict[str, DataLoader]:
         crop_to_bbox=args.crop_to_bbox,
         crop_margin=args.crop_margin,
         crop_jitter=args.crop_jitter,
+        dynamic_input=args.dynamic_input,
+        dynamic_min_size=args.dynamic_min_size,
+        dynamic_size_multiple=args.dynamic_size_multiple,
     )
     val_set = BBox8PoseDataset(
         labels_root=args.labels_root,
@@ -156,6 +162,9 @@ def build_dataloaders(args: argparse.Namespace) -> Dict[str, DataLoader]:
         crop_to_bbox=args.crop_to_bbox,
         crop_margin=args.crop_margin,
         crop_jitter=0.0,
+        dynamic_input=args.dynamic_input,
+        dynamic_min_size=args.dynamic_min_size,
+        dynamic_size_multiple=args.dynamic_size_multiple,
     )
     return {
         "train": DataLoader(
@@ -183,11 +192,54 @@ def masked_normalized_l1_coord_loss(
     valid_mask: torch.Tensor,
     image_size,
 ) -> torch.Tensor:
-    scale = pred_xy.new_tensor([float(image_size[0]), float(image_size[1])]).view(1, 1, 2)
+    if torch.is_tensor(image_size):
+        scale = image_size.to(device=pred_xy.device, dtype=pred_xy.dtype).view(pred_xy.shape[0], 1, 2)
+    else:
+        scale = pred_xy.new_tensor([float(image_size[0]), float(image_size[1])]).view(1, 1, 2)
     diff = (pred_xy - gt_xy).abs() / scale
     weights = valid_mask.float().unsqueeze(-1)
     denom = weights.sum().clamp_min(1.0) * 2.0
     return (diff * weights).sum() / denom
+
+
+def _batch_input_sizes(batch, default_image_size):
+    if "input_size" in batch:
+        return batch["input_size"]
+    return None
+
+
+def decode_argmax_for_batch(pred_heatmaps: torch.Tensor, batch, default_image_size) -> torch.Tensor:
+    input_sizes = _batch_input_sizes(batch, default_image_size)
+    if input_sizes is None:
+        return decode_heatmaps_argmax(pred_heatmaps, image_size=default_image_size)
+    heatmap_sizes = batch.get("sample_heatmap_size")
+    preds = []
+    for idx in range(pred_heatmaps.shape[0]):
+        image_size = tuple(int(v) for v in input_sizes[idx].detach().cpu().tolist())
+        if heatmap_sizes is None:
+            hm = pred_heatmaps[idx : idx + 1]
+        else:
+            hm_w, hm_h = [int(v) for v in heatmap_sizes[idx].detach().cpu().tolist()]
+            hm = pred_heatmaps[idx : idx + 1, :, :hm_h, :hm_w]
+        preds.append(decode_heatmaps_argmax(hm, image_size=image_size)[0])
+    return torch.stack(preds, dim=0)
+
+
+def decode_softargmax_for_batch(pred_heatmaps: torch.Tensor, batch, default_image_size, temperature: float) -> torch.Tensor:
+    input_sizes = _batch_input_sizes(batch, default_image_size)
+    if input_sizes is None:
+        return decode_heatmaps_softargmax(pred_heatmaps, image_size=default_image_size, temperature=temperature)
+    heatmap_sizes = batch.get("sample_heatmap_size")
+    preds = []
+    for idx in range(pred_heatmaps.shape[0]):
+        image_size = tuple(int(v) for v in input_sizes[idx].detach().cpu().tolist())
+        if heatmap_sizes is None:
+            hm = pred_heatmaps[idx : idx + 1]
+        else:
+            hm_w, hm_h = [int(v) for v in heatmap_sizes[idx].detach().cpu().tolist()]
+            hm = pred_heatmaps[idx : idx + 1, :, :hm_h, :hm_w]
+        preds.append(decode_heatmaps_softargmax(hm, image_size=image_size, temperature=temperature)[0])
+    return torch.stack(preds, dim=0)
 
 
 def run_epoch(
@@ -259,6 +311,12 @@ def run_epoch(
         target_heatmaps = batch["heatmaps"].to(device)  # target_heatmaps表示: 目标角点热图批；维度通常为 (B, K, Hh, Wh)；与模型输出逐元素对齐
         valid_mask = batch["valid_mask"].to(device)  # valid_mask表示: 角点有效性掩码；维度依赖实现，通常与 K 对齐；用于屏蔽无效角点的损失与评估
         gt_xy = batch["corners_xy"].to(device)  # gt_xy表示: 角点真值坐标；维度通常为 (B, K, 2)；最后一维为 (x, y)
+        heatmap_mask = batch.get("heatmap_mask")
+        if heatmap_mask is not None:
+            heatmap_mask = heatmap_mask.to(device)
+        input_sizes = batch.get("input_size")
+        if input_sizes is not None:
+            input_sizes = input_sizes.to(device)
 
         # * 这里利用 torch.set_grad_enabled 在同一套代码中统一处理训练与验证两种路径
         with torch.set_grad_enabled(train):
@@ -266,15 +324,17 @@ def run_epoch(
             # 再次啰嗦一嘴
             # critieon传入的是MSE均方误差
             # 也就是计算预测热图和真是热图之间的平均平方差
-            heatmap_loss = criterion(pred_heatmaps, target_heatmaps, valid_mask)
+            heatmap_loss = criterion(pred_heatmaps, target_heatmaps, valid_mask, heatmap_mask)
             loss = heatmap_loss
             if coord_loss_weight > 0:
-                pred_xy_soft = decode_heatmaps_softargmax(
+                pred_xy_soft = decode_softargmax_for_batch(
                     pred_heatmaps,
-                    image_size=image_size,
+                    batch=batch,
+                    default_image_size=image_size,
                     temperature=coord_softargmax_temp,
                 )
-                coord_loss = masked_normalized_l1_coord_loss(pred_xy_soft, gt_xy, valid_mask, image_size)
+                coord_scale = input_sizes if input_sizes is not None else image_size
+                coord_loss = masked_normalized_l1_coord_loss(pred_xy_soft, gt_xy, valid_mask, coord_scale)
                 loss = loss + float(coord_loss_weight) * coord_loss
             if train:
                 optimizer.zero_grad(set_to_none=True)  #* 清空历史梯度；set_to_none=True 可减少不必要的内存写入，通常更高效
@@ -283,7 +343,7 @@ def run_epoch(
         # * 条件分支结束后，pred_heatmaps 表示当前 batch 的热图预测；维度通常为 (B, K, Hh, Wh)；loss 表示当前 batch 的标量损失
 
         #! decode_heatmaps_argmax: 外部热图解码函数；通常在每个热图上取最大响应位置，并映射回图像坐标系
-        pred_xy = decode_heatmaps_argmax(pred_heatmaps.detach(), image_size=image_size)  # pred_xy表示: 从预测热图中解码出的角点坐标；通常为 (B, K, 2)；detach() 用于阻断梯度，避免评估路径保留计算图
+        pred_xy = decode_argmax_for_batch(pred_heatmaps.detach(), batch, image_size)  # pred_xy表示: 从预测热图中解码出的角点坐标；通常为 (B, K, 2)；detach() 用于阻断梯度，避免评估路径保留计算图
         #! corner_l2_error: 外部评估函数；输入预测/真值角点与有效掩码，输出角点欧氏距离误差统计字典
         metrics = corner_l2_error(pred_xy.cpu(), gt_xy.cpu(), valid_mask.cpu())  # metrics表示: 当前 batch 的误差统计结果；字典；至少包含 "mean_corner_l2" 键
         total_loss += loss.item()  #* 将当前 batch 的标量损失累加到 epoch 级统计量
@@ -369,7 +429,8 @@ def export_val_visualizations(model, dataset, device, image_size, output_dir, ep
         image = sample["image"].unsqueeze(0).to(device)  # image表示: 单样本输入图像批；(3, H, W) -> (1, 3, H, W)；通过增加 batch 维适配模型前向
         with torch.no_grad():
             pred_heatmaps = model(image)  # pred_heatmaps表示: 单样本预测热图；通常为 (1, K, Hh, Wh)
-            pred_xy = decode_heatmaps_argmax(pred_heatmaps, image_size=image_size)[0].cpu().numpy()  # pred_xy表示: 单样本预测角点坐标；通常为 (K, 2)；[0] 取出批中的唯一一个样本
+            sample_image_size = tuple(int(v) for v in sample.get("input_size", torch.tensor(image_size)).cpu().tolist())
+            pred_xy = decode_heatmaps_argmax(pred_heatmaps, image_size=sample_image_size)[0].cpu().numpy()  # pred_xy表示: 单样本预测角点坐标；通常为 (K, 2)；[0] 取出批中的唯一一个样本
 
         gt_xy = sample["corners_xy"].cpu().numpy()  # gt_xy表示: 当前样本在网络输入坐标系中的真值角点；通常为 (K, 2)
         valid_mask = sample["valid_mask"].cpu().numpy()  # valid_mask表示: 当前样本角点有效性掩码；维度通常与 K 对齐
@@ -384,7 +445,8 @@ def export_val_visualizations(model, dataset, device, image_size, output_dir, ep
             crop_box_np = (0.0, 0.0, float(orig_w), float(orig_h))
         else:
             crop_box_np = tuple(crop_box.cpu().numpy().tolist())
-        pred_xy_orig = transform_corners_from_crop(pred_xy, crop_box_np, image_size)
+        sample_image_size = tuple(int(v) for v in sample.get("input_size", torch.tensor(image_size)).cpu().tolist())
+        pred_xy_orig = transform_corners_from_crop(pred_xy, crop_box_np, sample_image_size)
         gt_xy_orig = sample["corners_xy_orig"].cpu().numpy()  # gt_xy_orig表示: 原图坐标系下的真值角点；通常为 (K, 2)；无需再次缩放
 
         #! draw_corners: 外部可视化函数；将角点和有效掩码叠加到 RGB 图像上，返回绘制后的图像

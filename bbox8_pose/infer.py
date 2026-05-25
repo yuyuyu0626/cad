@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 from .heatmap import decode_heatmaps_argmax
-from .dataset import transform_corners_from_crop
+from .dataset import dynamic_resize_size, transform_corners_from_crop
 from .model import BBox8PoseNet
 from .utils import draw_corners, ensure_dir, project_bbox8_from_pose, save_json, solve_pnp_from_bbox8
 
@@ -20,6 +20,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--image_width", type=int, default=256)
     parser.add_argument("--image_height", type=int, default=256)
+    parser.add_argument("--dynamic_input", action="store_true", help="Use aspect-ratio-preserving dynamic crop size from the checkpoint or CLI.")
+    parser.add_argument("--dynamic_min_size", type=int, default=128)
+    parser.add_argument("--dynamic_size_multiple", type=int, default=32)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--camera_json", default=None, help="Optional json with key cam_K or a flat 3x3 list")
     parser.add_argument("--bbox3d_json", default=None, help="Optional object_bbox_3d.json for solvePnP")
@@ -368,14 +371,23 @@ def detect_yolo_boxes(yolo_model, image_rgb: np.ndarray, args: argparse.Namespac
     return detections
 
 
-def infer_one_image(model, image_rgb: np.ndarray, args: argparse.Namespace, device: torch.device) -> np.ndarray:
-    resized = cv2.resize(image_rgb, (args.image_width, args.image_height), interpolation=cv2.INTER_LINEAR)
+def infer_one_image(model, image_rgb: np.ndarray, args: argparse.Namespace, device: torch.device):
+    image_size = (args.image_width, args.image_height)
+    if getattr(args, "dynamic_input", False):
+        image_size = dynamic_resize_size(
+            image_rgb.shape[1],
+            image_rgb.shape[0],
+            max_size=(args.image_width, args.image_height),
+            min_size=args.dynamic_min_size,
+            size_multiple=args.dynamic_size_multiple,
+        )
+    resized = cv2.resize(image_rgb, image_size, interpolation=cv2.INTER_LINEAR)
     tensor = torch.from_numpy(resized).permute(2, 0, 1).float().unsqueeze(0) / 255.0
     tensor = tensor.to(device)
     with torch.no_grad():
         pred_heatmaps = model(tensor)
-        pred_xy = decode_heatmaps_argmax(pred_heatmaps, image_size=(args.image_width, args.image_height))[0].cpu().numpy()
-    return pred_xy
+        pred_xy = decode_heatmaps_argmax(pred_heatmaps, image_size=image_size)[0].cpu().numpy()
+    return pred_xy, image_size
 
 
 def draw_instances(image_rgb: np.ndarray, instances: List[Dict]) -> np.ndarray:
@@ -395,6 +407,9 @@ def main() -> None:
     ckpt_args = ckpt.get("args", {})
     args.image_width = ckpt_args.get("image_width", args.image_width)
     args.image_height = ckpt_args.get("image_height", args.image_height)
+    args.dynamic_input = bool(ckpt_args.get("dynamic_input", args.dynamic_input))
+    args.dynamic_min_size = int(ckpt_args.get("dynamic_min_size", args.dynamic_min_size))
+    args.dynamic_size_multiple = int(ckpt_args.get("dynamic_size_multiple", args.dynamic_size_multiple))
     if args.crop_margin is None:
         args.crop_margin = float(ckpt_args.get("crop_margin", 0.15))
     model = BBox8PoseNet(
@@ -444,12 +459,13 @@ def main() -> None:
                 crop_box = expand_box(box, orig_w, orig_h, args.crop_margin)
                 x1, y1, x2, y2 = crop_box
                 crop_rgb = image_rgb[y1:y2, x1:x2]
-                pred_xy = infer_one_image(model, crop_rgb, args, device)
-                pred_xy_orig = transform_corners_from_crop(pred_xy, crop_box, (args.image_width, args.image_height))
+                pred_xy, input_size = infer_one_image(model, crop_rgb, args, device)
+                pred_xy_orig = transform_corners_from_crop(pred_xy, crop_box, input_size)
                 inst = {
                     "bbox": [float(x1), float(y1), float(x2), float(y2)],
                     "input_bbox": box_xyxy(box),
                     "corners_2d": pred_xy_orig.tolist(),
+                    "network_input_size": [int(input_size[0]), int(input_size[1])],
                 }
                 if isinstance(box, dict):
                     if "score" in box:
@@ -475,11 +491,12 @@ def main() -> None:
                 print(f"[WARN] {os.path.basename(image_path)}: no YOLO boxes found, using full-image fallback")
             if ckpt_args.get("crop_to_bbox", False):
                 print(f"[WARN] {os.path.basename(image_path)}: checkpoint was crop-trained; full-image fallback is distribution-mismatched")
-            pred_xy = infer_one_image(model, image_rgb, args, device)
-            pred_xy_orig = transform_corners_from_crop(pred_xy, (0, 0, orig_w, orig_h), (args.image_width, args.image_height))
+            pred_xy, input_size = infer_one_image(model, image_rgb, args, device)
+            pred_xy_orig = transform_corners_from_crop(pred_xy, (0, 0, orig_w, orig_h), input_size)
             inst = {
                 "bbox": None,
                 "corners_2d": pred_xy_orig.tolist(),
+                "network_input_size": [int(input_size[0]), int(input_size[1])],
             }
             if camera_K is not None and corners_3d is not None:
                 pnp = solve_pnp_from_bbox8(corners_3d, pred_xy_orig, camera_K, valid_mask)

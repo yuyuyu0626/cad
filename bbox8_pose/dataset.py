@@ -17,11 +17,7 @@ class AugmentConfig:
     brightness: float = 0.2
     contrast: float = 0.2
     saturation: float = 0.2
-    blur_prob: float = 0.2
-    blur_kernel: int = 5
-    noise_prob: float = 0.2
-    noise_scale: float = 0.05
-    hflip_prob: float = 0.5
+    blur_prob: float = 0.1
 
 
 def _load_jsonl(path: str) -> List[Dict]:
@@ -116,6 +112,48 @@ def transform_corners_from_crop(
     return out
 
 
+def _round_to_multiple(value: float, multiple: int) -> int:
+    multiple = max(1, int(multiple))
+    return max(multiple, int(round(float(value) / float(multiple))) * multiple)
+
+
+def dynamic_resize_size(
+    crop_width: int,
+    crop_height: int,
+    max_size: Tuple[int, int],
+    min_size: int = 128,
+    size_multiple: int = 32,
+) -> Tuple[int, int]:
+    crop_width = max(1, int(crop_width))
+    crop_height = max(1, int(crop_height))
+    max_w, max_h = max_size
+    aspect = float(crop_width) / float(crop_height)
+
+    if aspect >= 1.0:
+        out_w = int(max_w)
+        out_h = out_w / aspect
+        if out_h > max_h:
+            out_h = int(max_h)
+            out_w = out_h * aspect
+    else:
+        out_h = int(max_h)
+        out_w = out_h * aspect
+        if out_w > max_w:
+            out_w = int(max_w)
+            out_h = out_w / aspect
+
+    out_w = min(int(max_w), max(int(min_size), _round_to_multiple(out_w, size_multiple)))
+    out_h = min(int(max_h), max(int(min_size), _round_to_multiple(out_h, size_multiple)))
+    out_w = _round_to_multiple(out_w, size_multiple)
+    out_h = _round_to_multiple(out_h, size_multiple)
+    return out_w, out_h
+
+
+def heatmap_size_for_image(image_size: Tuple[int, int], stride: int = 4) -> Tuple[int, int]:
+    width, height = image_size
+    return max(1, int(height) // stride), max(1, int(width) // stride)
+
+
 class BBox8PoseDataset(Dataset):
     def __init__(
         self,
@@ -130,6 +168,9 @@ class BBox8PoseDataset(Dataset):
         crop_to_bbox: bool = False,
         crop_margin: float = 0.15,
         crop_jitter: float = 0.0,
+        dynamic_input: bool = False,
+        dynamic_min_size: int = 128,
+        dynamic_size_multiple: int = 32,
     ) -> None:
         self.labels_root = os.path.abspath(labels_root)
         self.image_size = image_size
@@ -142,6 +183,9 @@ class BBox8PoseDataset(Dataset):
         self.crop_to_bbox = bool(crop_to_bbox)
         self.crop_margin = float(crop_margin)
         self.crop_jitter = float(crop_jitter)
+        self.dynamic_input = bool(dynamic_input)
+        self.dynamic_min_size = int(dynamic_min_size)
+        self.dynamic_size_multiple = int(dynamic_size_multiple)
 
         ann_path = os.path.join(self.labels_root, "annotations.jsonl")
         split_path = os.path.join(self.labels_root, f"{split}.txt")
@@ -167,27 +211,13 @@ class BBox8PoseDataset(Dataset):
         return len(self.records)
 
     def _apply_augmentation(self, image: np.ndarray) -> np.ndarray:
-        """对图像进行多种数据增强操作"""
         image = image.astype(np.float32)
-        
-        # 随机亮度和对比度调整 (90% 概率)
         if self.rng.random() < 0.9:
             alpha = 1.0 + self.rng.uniform(-self.augment_cfg.contrast, self.augment_cfg.contrast)
             beta = 255.0 * self.rng.uniform(-self.augment_cfg.brightness, self.augment_cfg.brightness)
             image = image * alpha + beta
-        
-        # 随机高斯模糊
         if self.rng.random() < self.augment_cfg.blur_prob:
-            kernel_size = self.augment_cfg.blur_kernel
-            if kernel_size % 2 == 0:
-                kernel_size += 1
-            image = cv2.GaussianBlur(image, (kernel_size, kernel_size), 0)
-        
-        # 随机添加高斯噪声
-        if self.rng.random() < self.augment_cfg.noise_prob:
-            noise = self.rng.gauss(0, self.augment_cfg.noise_scale * 255.0)
-            image = image + noise * self.rng.uniform(0.3, 0.8)
-        
+            image = cv2.GaussianBlur(image, (5, 5), 0)
         return np.clip(image, 0, 255).astype(np.uint8)
 
     def __getitem__(self, index: int) -> Dict[str, torch.Tensor]:
@@ -202,17 +232,6 @@ class BBox8PoseDataset(Dataset):
         valid_mask = torch.tensor(rec["corner_valid_mask"], dtype=torch.float32)
         if self.use_soft_mask_filter and rec.get("visib_fract", 1.0) <= 0:
             valid_mask.zero_()
-
-        # 随机水平翻转 (仅在训练时)
-        do_hflip = False
-        if self.augment and self.rng.random() < self.augment_cfg.hflip_prob:
-            do_hflip = True
-            image = cv2.flip(image, 1)  # 1 表示水平翻转
-            orig_w_flip = orig_w
-            # 翻转角点的 x 坐标
-            corners[:, 0] = orig_w_flip - corners[:, 0]
-            # 如果有 8 个角点且需要重新排列顺序，这里可以添加重新排列逻辑
-            # 根据你的角点标号顺序可能需要调整
 
         crop_box = (0, 0, orig_w, orig_h)
         if self.crop_to_bbox:
@@ -230,15 +249,27 @@ class BBox8PoseDataset(Dataset):
 
         if self.augment:
             crop = self._apply_augmentation(crop)
-        resized = cv2.resize(crop, (self.image_size[0], self.image_size[1]), interpolation=cv2.INTER_LINEAR)
+        sample_image_size = self.image_size
+        sample_heatmap_size = self.heatmap_size
+        if self.dynamic_input:
+            sample_image_size = dynamic_resize_size(
+                crop.shape[1],
+                crop.shape[0],
+                max_size=self.image_size,
+                min_size=self.dynamic_min_size,
+                size_multiple=self.dynamic_size_multiple,
+            )
+            sample_heatmap_size = heatmap_size_for_image(sample_image_size)
+
+        resized = cv2.resize(crop, (sample_image_size[0], sample_image_size[1]), interpolation=cv2.INTER_LINEAR)
         image_tensor = torch.from_numpy(resized).permute(2, 0, 1).float() / 255.0
 
-        corners_resized = transform_corners_to_crop(corners, crop_box, self.image_size)
+        corners_resized = transform_corners_to_crop(corners, crop_box, sample_image_size)
         heatmaps = generate_corner_heatmaps(
             corners_xy=corners_resized,
             valid_mask=valid_mask,
-            image_size=self.image_size,
-            heatmap_size=self.heatmap_size,
+            image_size=sample_image_size,
+            heatmap_size=sample_heatmap_size,
             sigma=self.sigma,
         )
 
@@ -254,6 +285,8 @@ class BBox8PoseDataset(Dataset):
             "rgb_path": rec["rgb_path"],
             "orig_size": torch.tensor([orig_w, orig_h], dtype=torch.float32),
             "crop_box": torch.tensor(crop_box, dtype=torch.float32),
+            "input_size": torch.tensor([sample_image_size[0], sample_image_size[1]], dtype=torch.float32),
+            "sample_heatmap_size": torch.tensor([sample_heatmap_size[1], sample_heatmap_size[0]], dtype=torch.float32),
         }
 
 
@@ -269,9 +302,43 @@ def collate_bbox8(batch: List[Dict]) -> Dict[str, torch.Tensor]:
         "corners_3d",
         "orig_size",
         "crop_box",
+        "input_size",
+        "sample_heatmap_size",
     ]
+    variable_image = any(item["image"].shape != batch[0]["image"].shape for item in batch)
+    variable_heatmap = any(item["heatmaps"].shape != batch[0]["heatmaps"].shape for item in batch)
+    if variable_image:
+        max_h = max(item["image"].shape[-2] for item in batch)
+        max_w = max(item["image"].shape[-1] for item in batch)
+        images = []
+        for item in batch:
+            image = item["image"]
+            padded = image.new_zeros((image.shape[0], max_h, max_w))
+            padded[:, : image.shape[-2], : image.shape[-1]] = image
+            images.append(padded)
+        collated["image"] = torch.stack(images, dim=0)
+    if variable_heatmap:
+        max_hm_h = max(item["heatmaps"].shape[-2] for item in batch)
+        max_hm_w = max(item["heatmaps"].shape[-1] for item in batch)
+        heatmaps = []
+        heatmap_masks = []
+        for item in batch:
+            target = item["heatmaps"]
+            padded = target.new_zeros((target.shape[0], max_hm_h, max_hm_w))
+            padded[:, : target.shape[-2], : target.shape[-1]] = target
+            mask = target.new_zeros((1, max_hm_h, max_hm_w))
+            mask[:, : target.shape[-2], : target.shape[-1]] = 1.0
+            heatmaps.append(padded)
+            heatmap_masks.append(mask)
+        collated["heatmaps"] = torch.stack(heatmaps, dim=0)
+        collated["heatmap_mask"] = torch.stack(heatmap_masks, dim=0)
     for key in tensor_keys:
+        if key in collated:
+            continue
         collated[key] = torch.stack([item[key] for item in batch], dim=0)
+    if "heatmap_mask" not in collated:
+        b, _, h, w = collated["heatmaps"].shape
+        collated["heatmap_mask"] = collated["heatmaps"].new_ones((b, 1, h, w))
     collated["sample_id"] = [item["sample_id"] for item in batch]
     collated["rgb_path"] = [item["rgb_path"] for item in batch]
     return collated
